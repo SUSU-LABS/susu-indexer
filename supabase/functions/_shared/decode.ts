@@ -322,18 +322,39 @@ export function decodeChainEvent(raw: RpcEvent): DecodeResult {
   }
 }
 
-/** Decodes a batch, keeping the events that decode and counting the rest. */
+export type RejectedChainEvent = {
+  eventId: string;
+  reason: string;
+  ledger?: number;
+  txHash?: string;
+  txIndex?: number;
+  eventIndex?: number;
+  contractId?: string;
+};
+
+/** Decodes a batch, keeping the events that decode and preserving rejected events with coordinates. */
 export function decodeChainEvents(raw: readonly RpcEvent[]): {
   events: DecodedChainEvent[];
-  rejected: Array<{ eventId: string; reason: string }>;
+  rejected: RejectedChainEvent[];
 } {
   const events: DecodedChainEvent[] = [];
-  const rejected: Array<{ eventId: string; reason: string }> = [];
+  const rejected: RejectedChainEvent[] = [];
 
   for (const item of raw) {
     const result = decodeChainEvent(item);
-    if (result.ok) events.push(result.event);
-    else rejected.push({ eventId: item.id, reason: result.reason });
+    if (result.ok) {
+      events.push(result.event);
+    } else {
+      rejected.push({
+        eventId: item.id,
+        reason: result.reason,
+        ledger: item.ledger,
+        txHash: item.txHash,
+        txIndex: item.txIndex,
+        eventIndex: item.eventIndex,
+        contractId: item.contractId,
+      });
+    }
   }
 
   return { events, rejected };

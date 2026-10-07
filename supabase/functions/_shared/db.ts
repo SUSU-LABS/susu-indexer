@@ -44,6 +44,18 @@ export type IndexedEventRow = {
   value: string;
 };
 
+export type RejectedEventRow = {
+  /** Chain-derived identity; unique, so replays never duplicate rows. */
+  event_identity: string;
+  event_id: string;
+  reason: string;
+  ledger: number;
+  tx_hash: string;
+  tx_index: number;
+  event_index: number;
+  contract_id: string;
+};
+
 export class IndexerDb {
   #client: SupabaseClient;
 
@@ -99,6 +111,46 @@ export class IndexerDb {
 
     if (error) {
       throw new Error(`Failed to upsert indexed events: ${error.message}`);
+    }
+  }
+
+  /**
+   * Idempotently upserts rejected chain events.
+   *
+   * Preserves events the decoder could not recognise so that interface changes
+   * or decoder misses do not silently drop chain activity.
+   */
+  async upsertRejectedEvents(rows: readonly RejectedEventRow[]): Promise<void> {
+    if (rows.length === 0) return;
+
+    const { error } = await this.#client
+      .from('rejected_events')
+      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
+
+    if (error) {
+      throw new Error(`Failed to upsert rejected events: ${error.message}`);
+    }
+  }
+
+  /**
+   * Records an open alert for rejected events in indexer_alerts.
+   */
+  async recordRejectedAlert(count: number, reasons: readonly string[]): Promise<void> {
+    if (count <= 0) return;
+
+    const { error } = await this.#client
+      .from('indexer_alerts')
+      .upsert(
+        {
+          kind: 'rejected_events',
+          subject: 'decoder',
+          detail: { count, reasons: [...reasons] },
+        },
+        { onConflict: 'kind,subject' },
+      );
+
+    if (error) {
+      console.error(`Failed to record rejected events alert: ${error.message}`);
     }
   }
 

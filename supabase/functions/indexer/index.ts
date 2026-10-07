@@ -23,8 +23,8 @@
 import { authorizeInvocation } from '../_shared/auth.ts';
 import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
-import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
-import { decodeChainEvents } from '../_shared/decode.ts';
+import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
+import { decodeChainEvents, type RejectedChainEvent } from '../_shared/decode.ts';
 import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
 import { planIngest } from '../_shared/ingest.ts';
@@ -85,6 +85,28 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
     contract_id: event.contractId,
     topic: [...event.topic],
     value: event.value,
+  };
+}
+
+/** Maps a rejected event onto a rejected event row with coordinates. */
+export function toRejectedEventRow(event: RejectedChainEvent): RejectedEventRow {
+  const ledger = event.ledger ?? 0;
+  const txIndex = event.txIndex ?? 0;
+  const eventIndex = event.eventIndex ?? 0;
+  const txHash = event.txHash ?? '';
+  const identity = (event.ledger !== undefined && event.txHash)
+    ? `${ledger}-${txIndex}-${eventIndex}-${txHash}`
+    : `rejected-${event.eventId}`;
+
+  return {
+    event_identity: identity,
+    event_id: event.eventId,
+    reason: event.reason,
+    ledger,
+    tx_hash: txHash,
+    tx_index: txIndex,
+    event_index: eventIndex,
+    contract_id: event.contractId ?? '',
   };
 }
 
@@ -242,6 +264,20 @@ export async function handleRequest(
         rejected: rejected.length,
         reasons: rejected.slice(0, 5).map((item) => item.reason),
       });
+
+      // Persist rejected events and surface an open alert for observability (fixes #23)
+      await withRetry(
+        () => db.upsertRejectedEvents(rejected.map(toRejectedEventRow)),
+        RETRY,
+      );
+      await withRetry(
+        () =>
+          db.recordRejectedAlert(
+            rejected.length,
+            rejected.map((item) => item.reason),
+          ),
+        RETRY,
+      );
     }
 
     // Groups before events: every other fact refers to a group row, and in the
