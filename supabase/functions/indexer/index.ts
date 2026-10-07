@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  computeLedgerRange,
+  ledgerLag,
+  type LedgerRange,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -109,7 +114,7 @@ async function reconcileGroups(
 
 export async function handleRequest(
   request: Request,
-  deps: { db?: IndexerDb; rpc?: RpcSource } = {},
+  deps: { db?: IndexerDb; rpc?: RpcSource; config?: IndexerConfig } = {},
 ): Promise<Response> {
   const correlationId = crypto.randomUUID();
   const logger = createLogger(correlationId);
@@ -137,6 +142,12 @@ export async function handleRequest(
   const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
   const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
 
+  // Hoisted above the try: a mid-run failure must still record which ledger
+  // range was being processed. Stays null when the failure happens before the
+  // range is computed (or the run is skipped because there is nothing to
+  // index), in which case the failure is recorded with 0/0 as before.
+  let failureRange: LedgerRange | null = null;
+
   try {
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
     const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
@@ -160,6 +171,10 @@ export async function handleRequest(
         200,
       );
     }
+
+    // Snapshot for the catch block: from here on the run is processing this
+    // range, so a failure records the real from/to instead of 0/0.
+    failureRange = range;
 
     logger.info('Indexing ledger range', {
       ledgerFrom: range.from,
@@ -296,8 +311,8 @@ export async function handleRequest(
     try {
       await db.recordRunFailure({
         correlationId,
-        ledgerFrom: 0,
-        ledgerTo: 0,
+        ledgerFrom: failureRange?.from ?? 0,
+        ledgerTo: failureRange?.to ?? 0,
         reason,
       });
     } catch (recordError) {
