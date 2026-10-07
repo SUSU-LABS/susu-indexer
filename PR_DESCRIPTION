@@ -1,0 +1,13 @@
+## Summary
+This PR implements durable persistence and alerting for rejected (unrecognized) chain events, addressing issue #23.
+
+Changes made:
+- **Added `rejected_events` migration** (`migrations/003_create_rejected_events.sql`): New table storing contract address, topics, data, block number, transaction hash, log index, and decoder error for every rejected event.
+- **Updated `index.ts`**: After decoding, rejected events are now inserted into the `rejected_events` table instead of being silently logged. The `checkIndexerHealth` function now queries recent rejected event counts and emits a `warning` alert when any are detected in the last hour.
+- **Updated `decode.ts`**: Returns the rejected events tuple as before but with enriched reason metadata.
+- **Added tests** (`test/rejected_events.test.ts`): Two tests verify that (1) rejected events are persisted to the database with correct fields, and (2) the health check surfaces a warning alert containing the rejected count.
+
+Closes #23
+/attempt
+/claim #23
+<<<END_PR_DESCRIPTION>>>
