@@ -231,14 +231,19 @@ export class IndexerDb {
     };
 
     const rows = await Promise.all([
-      this.#selectIn('group_members', 'contract_id, position', ids),
-      this.#selectIn('contributions', 'contract_id, round, amount::text', ids),
-      this.#selectIn('payouts', 'contract_id, round, recipient_amount::text', ids),
-      this.#selectIn('protocol_fees', 'contract_id, round, fee::text', ids),
+      this.#selectIn('group_members', 'contract_id, position', ids, 'member'),
+      this.#selectIn('contributions', 'contract_id, round, amount::text', ids, 'event_identity'),
+      this.#selectIn(
+        'payouts',
+        'contract_id, round, recipient_amount::text',
+        ids,
+        'event_identity',
+      ),
+      this.#selectIn('protocol_fees', 'contract_id, round, fee::text', ids, 'event_identity'),
       // Lifecycle and the last ledger the group was heard from. `start` and
       // `completed` are the only events that change its status, and both are
       // emitted by the group itself.
-      this.#selectIn('decoded_events', 'contract_id, name, ledger', ids),
+      this.#selectIn('decoded_events', 'contract_id, name, ledger', ids, 'event_identity'),
     ]);
 
     const [members, contributions, payouts, fees, events] = rows as [
@@ -363,19 +368,45 @@ export class IndexerDb {
     table: string,
     columns: string,
     contractIds: readonly string[],
+    tieBreaker: string | null = null,
+    pageSize = 1000,
+    idChunkSize = 100,
   ): Promise<Record<string, unknown>[]> {
-    const { data, error } = await this.#client
-      .from(table)
-      .select(columns)
-      .in('contract_id', [...contractIds]);
+    const all: Record<string, unknown>[] = [];
 
-    if (error) {
-      throw new Error(`Failed to read ${table}: ${error.message}`);
+    // Chunk the id list to keep the request URL short, and page each chunk so
+    // PostgREST's max-rows cap can never silently truncate the facts a total
+    // is derived from. Pages are only consistent under a TOTAL order: many rows
+    // share a contract_id, so the table's unique key breaks the tie. Without it
+    // Postgres may return overlapping or skipped rows between pages.
+    for (let i = 0; i < contractIds.length; i += idChunkSize) {
+      const chunk = contractIds.slice(i, i + idChunkSize);
+      let from = 0;
+
+      while (true) {
+        let query = this.#client
+          .from(table)
+          .select(columns)
+          .in('contract_id', chunk)
+          .order('contract_id', { ascending: true });
+        if (tieBreaker !== null) query = query.order(tieBreaker, { ascending: true });
+        const { data, error } = await query.range(from, from + pageSize - 1);
+
+        if (error) {
+          throw new Error(`Failed to read ${table}: ${error.message}`);
+        }
+
+        // The column list is dynamic, so the client's inferred row type is not
+        // usable here. Callers coerce each field they read.
+        const page = (data ?? []) as unknown as Record<string, unknown>[];
+        all.push(...page);
+
+        if (page.length < pageSize) break;
+        from += pageSize;
+      }
     }
 
-    // The column list is dynamic, so the client's inferred row type is not
-    // usable here. Callers coerce each field they read.
-    return (data ?? []) as unknown as Record<string, unknown>[];
+    return all;
   }
 
   /**
