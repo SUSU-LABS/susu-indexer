@@ -409,6 +409,32 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
     assertEquals(runs.length, 1);
     assertEquals(runs[0]?.['status'], 'failed');
     assert((runs[0]?.['reason'] as string).length > 0, 'a reason must be recorded');
+
+    // The failed run records the range it was actually working on, so an
+    // operator reading indexer_runs knows which ledgers to retry.
+    assertEquals(runs[0]?.['ledger_from'], SCENARIO_FROM);
+    assertEquals(runs[0]?.['ledger_to'], SCENARIO_HEAD);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a failure before the range is computed records an unknown range of 0/0', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db } = makeDeps([], SCENARIO_HEAD);
+    // The checkpoint read fails, so no range has been computed yet.
+    stub.failOn = { table: 'indexer_checkpoints', op: 'select' };
+
+    const response = await handleRequest(authorizedRequest(), { db });
+    assertEquals(response.status, 500);
+    const body = await response.json();
+    assertEquals(body.status, 'failed');
+
+    const runs = stub.rows('indexer_runs');
+    assertEquals(runs.length, 1);
+    assertEquals(runs[0]?.['ledger_from'], 0);
+    assertEquals(runs[0]?.['ledger_to'], 0);
   } finally {
     restoreEnv();
   }
