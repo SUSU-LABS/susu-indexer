@@ -146,23 +146,30 @@ honestly: reconciliation corrects a group discovery has already recorded, and it
 
 Operational tables:
 
-| Table                 | Purpose                                                  |
-| --------------------- | -------------------------------------------------------- |
-| `indexer_checkpoints` | Last fully processed ledger and rebuild origin           |
-| `indexed_events`      | Raw chain events, deduplicated by chain-derived identity |
-| `indexer_runs`        | Append-only log of **failures**, for monitoring          |
-| `indexer_alerts`      | One row per health condition, open until it clears       |
+| Table                     | Purpose                                                     |
+| ------------------------- | ----------------------------------------------------------- |
+| `indexer_checkpoints`     | Last fully processed ledger and rebuild origin              |
+| `indexed_events`          | Raw chain events, deduplicated by chain-derived identity    |
+| `indexer_runs`            | Append-only log of **failures**, for monitoring             |
+| `indexer_alerts`          | One row per health condition, open until it clears          |
+| `indexer_rejected_events` | Raw events the decoder refused, with reason and coordinates |
 
 `indexer_runs` records failures only, on purpose: the run log exists so a failure's reason is
 readable, and a successful run leaves its evidence in `indexer_checkpoints.updated_at` advancing.
 That makes the checkpoint's timestamp the liveness heartbeat — a stopped indexer is one whose
 checkpoint stops moving.
 
+`indexer_rejected_events` records every event the decoder could not recognise, keyed by the RPC's
+paging token so re-reading a range cannot duplicate it. A rejection is the highest-consequence
+silent failure — a decoder miss means the contract interface moved and can hide a real contribution
+or payout — so the indexer writes these before it may advance the checkpoint, and the health check
+alerts on them.
+
 `indexer_alerts` is written by `check_indexer_health()`, scheduled every fifteen minutes. It watches
-three conditions — a stale checkpoint, a recorded failure, and a scheduled invocation that did not
-succeed — and holds exactly one open row per condition, refreshing it while the condition persists
-and resolving it when it clears. Open rows with a null `notified_at` are alerts nobody was told
-about, which happens when no webhook is configured. See
+four conditions — a stale checkpoint, a recorded failure, a rejected event, and a scheduled
+invocation that did not succeed — and holds exactly one open row per condition, refreshing it while
+the condition persists and resolving it when it clears. Open rows with a null `notified_at` are
+alerts nobody was told about, which happens when no webhook is configured. See
 [the runbook](RUNBOOK.md#alerts-and-what-they-are-for).
 
 Chain-derived tables, each rebuildable from the one before it:

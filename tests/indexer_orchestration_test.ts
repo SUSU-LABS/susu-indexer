@@ -389,6 +389,107 @@ Deno.test('handleRequest runs the full two-pass flow and advances the checkpoint
   }
 });
 
+Deno.test('a rejected event is persisted with its coordinates before the checkpoint advances', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const base = factoryEvent(5);
+    if (!base) throw new Error('fixture is empty');
+    // A real Factory event with its body replaced by a symbol: it decodes to a
+    // non-map and is rejected, but keeps a distinct identity from its source.
+    const rejectedEvent: RpcEvent = {
+      ...base,
+      eventIndex: base.eventIndex + 1000,
+      id: `${base.ledger}-${base.eventIndex + 1000}`,
+      value: base.topic[0] as string,
+    };
+
+    const { stub, db, rpc } = makeDeps(
+      [rejectedEvent, factoryEvent(5), ...groupEvents],
+      SCENARIO_HEAD,
+    );
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.eventsRejected, 1);
+    assertEquals(body.eventsDecoded, groupEvents.length + 1);
+
+    // The acceptance criterion: a rejection is a durable record, not a log line.
+    const rows = stub.rows('indexer_rejected_events');
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0]?.['event_id'], rejectedEvent.id);
+    assertEquals(rows[0]?.['contract_id'], rejectedEvent.contractId);
+    assertEquals(rows[0]?.['ledger'], rejectedEvent.ledger);
+    assertEquals(rows[0]?.['event_index'], rejectedEvent.eventIndex);
+    assert(
+      (rows[0]?.['reason'] as string).includes('not a map'),
+      'the rejection reason must be recorded',
+    );
+
+    // Persisting the rejection is part of the write set, so the checkpoint
+    // still advances once everything is on record.
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a run whose only event is rejected still records it', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const base = factoryEvent(5);
+    if (!base) throw new Error('fixture is empty');
+    const rejectedEvent: RpcEvent = {
+      ...base,
+      eventIndex: base.eventIndex + 1000,
+      id: `${base.ledger}-${base.eventIndex + 1000}`,
+      value: base.topic[0] as string,
+    };
+
+    const { stub, db, rpc } = makeDeps([rejectedEvent], SCENARIO_HEAD);
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.eventsRejected, 1);
+    assertEquals(body.eventsDecoded, 0);
+    assertEquals(stub.rows('indexer_rejected_events').length, 1);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('IndexerDb.recordRejectedEvents throws so a rejection cannot be silently lost', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  stub.errorOn = { table: 'indexer_rejected_events', op: 'upsert' };
+
+  await assertRejects(
+    () =>
+      db.recordRejectedEvents('corr', [{
+        event_id: 'ledger-token-7',
+        ledger: 10,
+        tx_hash: 'a'.repeat(64),
+        tx_index: 0,
+        event_index: 7,
+        contract_id: FACTORY_ID,
+        reason: 'unknown event name',
+      }]),
+    Error,
+    'rejected events',
+  );
+});
+
+Deno.test('IndexerDb.recordRejectedEvents is a no-op for an empty batch', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  await db.recordRejectedEvents('corr', []);
+  assertEquals(stub.rows('indexer_rejected_events').length, 0);
+  assertEquals(stub.callsTo('indexer_rejected_events', 'upsert'), []);
+});
+
 Deno.test('a failed run records the failure and never advances the checkpoint', async () => {
   const restoreEnv = withTestEnv();
   try {

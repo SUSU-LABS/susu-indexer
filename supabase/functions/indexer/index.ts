@@ -23,7 +23,7 @@
 import { authorizeInvocation } from '../_shared/auth.ts';
 import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
-import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
+import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
 import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
@@ -244,10 +244,25 @@ export async function handleRequest(
       });
     }
 
+    // Persist every rejection before the checkpoint can move. A decoder miss is
+    // the highest-consequence silent failure — it can hide a real contribution
+    // or payout — so it is written durably (and alerted on by the health check)
+    // rather than left as a truncated log line.
+    const rejectedRows: RejectedEventRow[] = rejected.map((item) => ({
+      event_id: item.eventId,
+      ledger: item.ledger,
+      tx_hash: item.txHash,
+      tx_index: item.txIndex,
+      event_index: item.eventIndex,
+      contract_id: item.contractId,
+      reason: item.reason,
+    }));
+
     // Groups before events: every other fact refers to a group row, and in the
     // range that discovers a group, both arrive together.
     await withRetry(() => db.upsertGroups(newGroups), RETRY);
     await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), RETRY);
+    await withRetry(() => db.recordRejectedEvents(correlationId, rejectedRows), RETRY);
 
     const plan = planIngest(decoded);
     await withRetry(() => db.persistPlan(plan), RETRY);
