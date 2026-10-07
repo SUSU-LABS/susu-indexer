@@ -84,7 +84,7 @@ class StubSupabaseClient {
   }
 }
 
-type Filter = { column: string; op: 'eq' | 'in'; value: unknown };
+type Filter = { column: string; op: 'eq' | 'in' | 'lt'; value: unknown };
 
 class StubBuilder {
   #client: StubSupabaseClient;
@@ -97,6 +97,7 @@ class StubBuilder {
   #upsertIgnoreDuplicates = false;
   #insertRow: Row | null = null;
   #updateValues: Row | null = null;
+  #range: { from: number; to: number } | null = null;
 
   constructor(client: StubSupabaseClient, table: string) {
     this.#client = client;
@@ -104,7 +105,23 @@ class StubBuilder {
   }
 
   select(_columns: string): this {
-    this.#mode = 'select';
+    if (this.#mode !== 'update') {
+      this.#mode = 'select';
+    }
+    return this;
+  }
+
+  order(_col: string, _opts?: { ascending: boolean }): this {
+    return this;
+  }
+
+  range(from: number, to: number): this {
+    this.#range = { from, to };
+    return this;
+  }
+
+  lt(column: string, value: unknown): this {
+    this.#filters.push({ column, op: 'lt', value });
     return this;
   }
 
@@ -163,6 +180,10 @@ class StubBuilder {
     return this.#filters.every((filter) => {
       const value = row[filter.column];
       if (filter.op === 'eq') return value === filter.value;
+      if (filter.op === 'lt') {
+        return typeof value === 'number' && typeof filter.value === 'number' &&
+          value < filter.value;
+      }
       return (filter.value as unknown[]).includes(value);
     });
   }
@@ -186,7 +207,10 @@ class StubBuilder {
     this.#client.calls.push({ table: this.#table, op: mode });
     switch (mode) {
       case 'select': {
-        const rows = this.#client.rows(this.#table).filter((row) => this.#matches(row));
+        let rows = this.#client.rows(this.#table).filter((row) => this.#matches(row));
+        if (this.#range !== null) {
+          rows = rows.slice(this.#range.from, this.#range.to + 1);
+        }
         if (this.#maybeSingle) return Promise.resolve({ data: rows[0] ?? null, error: null });
         return Promise.resolve({ data: rows, error: null });
       }
@@ -212,7 +236,7 @@ class StubBuilder {
       case 'update': {
         const matched = this.#client.rows(this.#table).filter((row) => this.#matches(row));
         for (const row of matched) Object.assign(row, this.#updateValues);
-        return Promise.resolve({ error: null, count: matched.length });
+        return Promise.resolve({ error: null, count: matched.length, data: matched });
       }
     }
   }

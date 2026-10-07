@@ -116,11 +116,15 @@ export class IndexerDb {
 
     while (true) {
       const to = from + pageSize - 1;
-      const { data, error } = await this.#client
-        .from('groups')
-        .select('contract_id')
-        .order('contract_id', { ascending: true })
-        .range(from, to);
+      const selectQuery = this.#client.from('groups').select('contract_id');
+      const orderedQuery = typeof (selectQuery as { order?: unknown }).order === 'function'
+        ? (selectQuery as { order: (col: string, opts?: unknown) => typeof selectQuery }).order(
+          'contract_id',
+          { ascending: true },
+        )
+        : selectQuery;
+
+      const { data, error } = await orderedQuery.range(from, to);
 
       if (error) {
         throw new Error(`Failed to read indexed group contracts: ${error.message}`);
@@ -207,7 +211,10 @@ export class IndexerDb {
    * code saw it. `sumAmounts` refuses a value that is not an integer string, so
    * dropping a cast here fails loudly rather than quietly.
    */
-  async readGroupFacts(contractIds: readonly string[]): Promise<Map<string, GroupFacts>> {
+  async readGroupFacts(
+    contractIds: readonly string[],
+    pageSize = 1000,
+  ): Promise<Map<string, GroupFacts>> {
     const facts = new Map<string, GroupFacts>();
     if (contractIds.length === 0) return facts;
 
@@ -231,14 +238,14 @@ export class IndexerDb {
     };
 
     const rows = await Promise.all([
-      this.#selectIn('group_members', 'contract_id, position', ids),
-      this.#selectIn('contributions', 'contract_id, round, amount::text', ids),
-      this.#selectIn('payouts', 'contract_id, round, recipient_amount::text', ids),
-      this.#selectIn('protocol_fees', 'contract_id, round, fee::text', ids),
+      this.#selectIn('group_members', 'contract_id, position', ids, pageSize),
+      this.#selectIn('contributions', 'contract_id, round, amount::text', ids, pageSize),
+      this.#selectIn('payouts', 'contract_id, round, recipient_amount::text', ids, pageSize),
+      this.#selectIn('protocol_fees', 'contract_id, round, fee::text', ids, pageSize),
       // Lifecycle and the last ledger the group was heard from. `start` and
       // `completed` are the only events that change its status, and both are
       // emitted by the group itself.
-      this.#selectIn('decoded_events', 'contract_id, name, ledger', ids),
+      this.#selectIn('decoded_events', 'contract_id, name, ledger', ids, pageSize),
     ]);
 
     const [members, contributions, payouts, fees, events] = rows as [
@@ -284,7 +291,10 @@ export class IndexerDb {
   }
 
   /** Reads the derived state currently stored for the given groups. */
-  async readGroupState(contractIds: readonly string[]): Promise<Map<string, StoredGroupState>> {
+  async readGroupState(
+    contractIds: readonly string[],
+    pageSize = 1000,
+  ): Promise<Map<string, StoredGroupState>> {
     const states = new Map<string, StoredGroupState>();
     if (contractIds.length === 0) return states;
 
@@ -293,6 +303,7 @@ export class IndexerDb {
       'contract_id, status, member_count, current_round, completed_rounds, ' +
         'contributed_total::text, paid_out_total::text, fee_total::text, last_event_ledger',
       contractIds,
+      pageSize,
     );
 
     for (const row of rows) {
@@ -363,19 +374,65 @@ export class IndexerDb {
     table: string,
     columns: string,
     contractIds: readonly string[],
+    pageSize = 1000,
   ): Promise<Record<string, unknown>[]> {
-    const { data, error } = await this.#client
-      .from(table)
-      .select(columns)
-      .in('contract_id', [...contractIds]);
+    if (contractIds.length === 0) return [];
+    if (pageSize <= 0) {
+      throw new Error(`pageSize must be positive, got ${pageSize}`);
+    }
 
-    if (error) {
-      throw new Error(`Failed to read ${table}: ${error.message}`);
+    const CONTRACT_CHUNK_SIZE = 100;
+    const allRows: Record<string, unknown>[] = [];
+
+    for (let c = 0; c < contractIds.length; c += CONTRACT_CHUNK_SIZE) {
+      const chunk = contractIds.slice(c, c + CONTRACT_CHUNK_SIZE);
+      let from = 0;
+
+      while (true) {
+        const to = from + pageSize - 1;
+        const selectQuery = this.#client
+          .from(table)
+          .select(columns)
+          .in('contract_id', chunk);
+
+        const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
+          ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(
+            from,
+            to,
+          )
+          : selectQuery;
+
+        const { data, error } = await pagedQuery;
+
+        if (error) {
+          throw new Error(`Failed to read ${table}: ${error.message}`);
+        }
+
+        const rows = (data ?? []) as unknown as Record<string, unknown>[];
+        for (const row of rows) {
+          allRows.push(row);
+        }
+
+        if (typeof (selectQuery as { range?: unknown }).range !== 'function') {
+          if (rows.length >= pageSize) {
+            throw new Error(
+              `Failed to read ${table}: returned ${rows.length} rows at server cap without pagination support`,
+            );
+          }
+          break;
+        }
+
+        if (rows.length < pageSize) {
+          break;
+        }
+
+        from += pageSize;
+      }
     }
 
     // The column list is dynamic, so the client's inferred row type is not
     // usable here. Callers coerce each field they read.
-    return (data ?? []) as unknown as Record<string, unknown>[];
+    return allRows;
   }
 
   /**
