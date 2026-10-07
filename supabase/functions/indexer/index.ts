@@ -51,6 +51,13 @@ export type RpcSource = EventSource & {
   getLatestLedger(): Promise<number>;
 };
 
+type RequestDependencies = {
+  db?: IndexerDb;
+  rpc?: RpcSource;
+  config?: IndexerConfig;
+  env?: Record<string, string | undefined>;
+};
+
 type RunSummary = {
   status: 'ok' | 'skipped' | 'failed';
   correlationId: string;
@@ -114,14 +121,23 @@ async function reconcileGroups(
 
 export async function handleRequest(
   request: Request,
-  deps: { db?: IndexerDb; rpc?: RpcSource; config?: IndexerConfig } = {},
+  deps: RequestDependencies = {},
 ): Promise<Response> {
   const correlationId = crypto.randomUUID();
   const logger = createLogger(correlationId);
 
-  const configResult = (deps && 'config' in deps && deps.config)
+  const rawTaskSecret = deps.config?.taskSecret ??
+    (deps.env ? deps.env['INDEXER_TASK_SECRET'] : Deno.env.get('INDEXER_TASK_SECRET'));
+  const taskSecret = rawTaskSecret?.trim() || undefined;
+  const auth = authorizeInvocation(request.headers, taskSecret);
+  if (!auth.authorized) {
+    logger.warn('Rejected unauthorised indexer invocation', { reason: auth.reason });
+    return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
+  }
+
+  const configResult = deps.config
     ? { ok: true as const, config: deps.config }
-    : loadConfig();
+    : loadConfig(deps.env);
   if (!configResult.ok) {
     // Report which variables are problematic — never their values.
     const reason = `invalid configuration (missing: ${
@@ -132,12 +148,6 @@ export async function handleRequest(
   }
 
   const config = configResult.config;
-
-  const auth = authorizeInvocation(request.headers, config.taskSecret);
-  if (!auth.authorized) {
-    logger.warn('Rejected unauthorised indexer invocation', { reason: auth.reason });
-    return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
-  }
 
   const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
   const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
