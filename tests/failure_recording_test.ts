@@ -1,6 +1,6 @@
 import { assertEquals, assertExists } from '@std/assert';
 import { IndexerDb } from '../supabase/functions/_shared/db.ts';
-import { handleRequest } from '../supabase/functions/indexer/index.ts';
+import { handleRequest, type RpcSource } from '../supabase/functions/indexer/index.ts';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 Deno.test('recordRunFailure never rejects when the insert promise rejects with a network error', async () => {
@@ -103,4 +103,110 @@ Deno.test('handleRequest returns structured 500 when indexer run fails and recor
   assertEquals(body.status, 'failed');
   assertExists(body.correlationId);
   assertEquals(body.reason, 'Database unreachable');
+});
+
+Deno.test('handleRequest records the computed ledger range when a mid-run failure occurs', async () => {
+  const dummyConfig = {
+    supabaseUrl: 'https://example.supabase.co',
+    serviceRoleKey: 'service-role-key',
+    taskSecret: 'a'.repeat(48),
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    network: 'testnet' as const,
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    factoryContractId: `C${'A'.repeat(55)}`,
+    usdcContractId: `C${'B'.repeat(55)}`,
+    startLedger: 1,
+    maxLedgersPerRun: 1000,
+    allowMainnet: false,
+  };
+
+  const recordedCalls: Array<{
+    correlationId: string;
+    ledgerFrom: number;
+    ledgerTo: number;
+    reason: string;
+  }> = [];
+
+  // Checkpoint at 99, latest ledger 250 -> computed range { from: 100, to: 250 }.
+  // listGroupContractIds throws, simulating a failure after the range is
+  // computed but before any writes happen.
+  const midRunFailureDb = {
+    getCheckpoint: () => Promise.resolve({ lastProcessedLedger: 99, startLedger: 1 }),
+    listGroupContractIds: () => Promise.reject(new Error('RPC exploded mid-run')),
+    recordRunFailure: (params: {
+      correlationId: string;
+      ledgerFrom: number;
+      ledgerTo: number;
+      reason: string;
+    }) => {
+      recordedCalls.push(params);
+      return Promise.resolve();
+    },
+  } as unknown as IndexerDb;
+
+  const rpc = {
+    getLatestLedger: () => Promise.resolve(250),
+  };
+
+  const request = new Request('https://indexer.example.com/', {
+    headers: {
+      'x-indexer-task-secret': 'a'.repeat(48),
+    },
+  });
+
+  const response = await handleRequest(request, {
+    db: midRunFailureDb,
+    rpc: rpc as unknown as RpcSource,
+    config: dummyConfig,
+  });
+
+  assertEquals(response.status, 500);
+  assertEquals(recordedCalls.length, 1);
+  const recorded = recordedCalls[0];
+  assertExists(recorded);
+  assertEquals(recorded.ledgerFrom, 100);
+  assertEquals(recorded.ledgerTo, 250);
+  assertEquals(recorded.reason, 'RPC exploded mid-run');
+});
+
+Deno.test('handleRequest records 0/0 when the failure happens before the range is computed', async () => {
+  const dummyConfig = {
+    supabaseUrl: 'https://example.supabase.co',
+    serviceRoleKey: 'service-role-key',
+    taskSecret: 'a'.repeat(48),
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    network: 'testnet' as const,
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    factoryContractId: `C${'A'.repeat(55)}`,
+    usdcContractId: `C${'B'.repeat(55)}`,
+    startLedger: 1,
+    maxLedgersPerRun: 1000,
+    allowMainnet: false,
+  };
+
+  const recordedCalls: Array<{ ledgerFrom: number; ledgerTo: number }> = [];
+
+  // getCheckpoint throws, so no range is ever computed.
+  const earlyFailureDb = {
+    getCheckpoint: () => Promise.reject(new Error('Database unreachable')),
+    recordRunFailure: (params: { ledgerFrom: number; ledgerTo: number }) => {
+      recordedCalls.push(params);
+      return Promise.resolve();
+    },
+  } as unknown as IndexerDb;
+
+  const request = new Request('https://indexer.example.com/', {
+    headers: {
+      'x-indexer-task-secret': 'a'.repeat(48),
+    },
+  });
+
+  const response = await handleRequest(request, { db: earlyFailureDb, config: dummyConfig });
+
+  assertEquals(response.status, 500);
+  assertEquals(recordedCalls.length, 1);
+  const recorded = recordedCalls[0];
+  assertExists(recorded);
+  assertEquals(recorded.ledgerFrom, 0);
+  assertEquals(recorded.ledgerTo, 0);
 });
