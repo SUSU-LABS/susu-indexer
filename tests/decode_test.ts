@@ -193,6 +193,24 @@ Deno.test('a rejected event does not discard the rest of its batch', () => {
   assertEquals(events.length, groupEvents.length);
 });
 
+Deno.test('a rejected event keeps its chain coordinates so it can be located', () => {
+  const base = groupEvent(0);
+  const bad = { ...base, value: base.topic[0] as string };
+
+  const { rejected } = decodeChainEvents([bad]);
+
+  assertEquals(rejected.length, 1);
+  const event = rejected[0];
+  if (event === undefined) throw new Error('expected one rejected event');
+  assertEquals(event.eventId, base.id);
+  assertEquals(event.contractId, base.contractId);
+  assertEquals(event.ledger, base.ledger);
+  assertEquals(event.txHash, base.txHash);
+  assertEquals(event.txIndex, base.txIndex);
+  assertEquals(event.eventIndex, base.eventIndex);
+  assertEquals(event.reason.includes('not a map'), true);
+});
+
 Deno.test('an event from an unsuccessful contract call is rejected', () => {
   const contribution = groupEvents.find((e) => decodeOk(e).name === 'contribution');
   if (contribution === undefined) throw new Error('no contribution event in fixture');

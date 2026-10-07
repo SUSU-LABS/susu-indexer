@@ -107,6 +107,15 @@ export type DecodeResult =
   | { ok: true; event: DecodedChainEvent }
   | { ok: false; reason: string };
 
+/**
+ * A raw event the decoder could not fully recognise.
+ *
+ * It carries the same chain coordinates as a decoded event plus the reason, so
+ * a rejection can be persisted with enough context to locate the offending
+ * event on chain — identity, reason and coordinates — rather than only counted.
+ */
+export type RejectedChainEvent = EventCoordinates & { reason: string };
+
 /** How many topics each event is required to carry, including the namespace. */
 const TOPIC_COUNT: Record<ChainEventName, number> = {
   group_created: 4,
@@ -325,15 +334,26 @@ export function decodeChainEvent(raw: RpcEvent): DecodeResult {
 /** Decodes a batch, keeping the events that decode and counting the rest. */
 export function decodeChainEvents(raw: readonly RpcEvent[]): {
   events: DecodedChainEvent[];
-  rejected: Array<{ eventId: string; reason: string }>;
+  rejected: RejectedChainEvent[];
 } {
   const events: DecodedChainEvent[] = [];
-  const rejected: Array<{ eventId: string; reason: string }> = [];
+  const rejected: RejectedChainEvent[] = [];
 
   for (const item of raw) {
     const result = decodeChainEvent(item);
-    if (result.ok) events.push(result.event);
-    else rejected.push({ eventId: item.id, reason: result.reason });
+    if (result.ok) {
+      events.push(result.event);
+    } else {
+      rejected.push({
+        contractId: item.contractId,
+        ledger: item.ledger,
+        txHash: item.txHash,
+        txIndex: item.txIndex,
+        eventIndex: item.eventIndex,
+        eventId: item.id,
+        reason: result.reason,
+      });
+    }
   }
 
   return { events, rejected };

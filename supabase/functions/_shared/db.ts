@@ -44,6 +44,22 @@ export type IndexedEventRow = {
   value: string;
 };
 
+/**
+ * A raw event the decoder rejected, as it is persisted.
+ *
+ * The identity (`event_id`) and the chain coordinates let an operator find the
+ * offending event on chain; the reason says why the decoder refused it.
+ */
+export type RejectedEventRow = {
+  event_id: string;
+  ledger: number;
+  tx_hash: string;
+  tx_index: number;
+  event_index: number;
+  contract_id: string;
+  reason: string;
+};
+
 export class IndexerDb {
   #client: SupabaseClient;
 
@@ -99,6 +115,38 @@ export class IndexerDb {
 
     if (error) {
       throw new Error(`Failed to upsert indexed events: ${error.message}`);
+    }
+  }
+
+  /**
+   * Persists events the decoder could not recognise, one row per event identity.
+   *
+   * Conflicting on `event_id` means the same range was re-read, so the existing
+   * row is kept. Unlike `recordRunFailure`, this throws on failure: a rejection
+   * is only durable once written, and swallowing the error would let the
+   * checkpoint advance past an event that nobody can fetch again. The caller
+   * retries, and the range moves on only once every rejection is on record.
+   */
+  async recordRejectedEvents(
+    correlationId: string,
+    rows: readonly RejectedEventRow[],
+  ): Promise<void> {
+    if (rows.length === 0) return;
+
+    const { error } = await this.#client
+      .from('indexer_rejected_events')
+      .upsert(
+        // Truncated: reasons are short by construction, but never unbounded.
+        rows.map((row) => ({
+          ...row,
+          reason: row.reason.slice(0, 500),
+          correlation_id: correlationId,
+        })),
+        { onConflict: 'event_id', ignoreDuplicates: true },
+      );
+
+    if (error) {
+      throw new Error(`Failed to persist rejected events: ${error.message}`);
     }
   }
 
