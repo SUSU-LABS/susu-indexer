@@ -147,6 +147,11 @@ export async function handleRequest(
   const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
   const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
 
+  // Hoisted out of the try so the catch block can report the ledger range the
+  // run had actually reached when it failed. Until the range is computed it
+  // stays null, and a failure before that is recorded as an unknown range.
+  let failedRange: { from: number; to: number } | null = null;
+
   try {
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
     const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
@@ -170,6 +175,8 @@ export async function handleRequest(
         200,
       );
     }
+
+    failedRange = { from: range.from, to: range.to };
 
     logger.info('Indexing ledger range', {
       ledgerFrom: range.from,
@@ -321,8 +328,8 @@ export async function handleRequest(
     try {
       await db.recordRunFailure({
         correlationId,
-        ledgerFrom: 0,
-        ledgerTo: 0,
+        ledgerFrom: failedRange?.from ?? 0,
+        ledgerTo: failedRange?.to ?? 0,
         reason,
       });
     } catch (recordError) {
