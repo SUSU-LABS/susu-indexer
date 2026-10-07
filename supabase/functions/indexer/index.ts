@@ -109,12 +109,21 @@ async function reconcileGroups(
 
 export async function handleRequest(
   request: Request,
-  deps: { db?: IndexerDb; rpc?: RpcSource } = {},
+  deps: { db?: IndexerDb; rpc?: RpcSource; config?: IndexerConfig } = {},
 ): Promise<Response> {
   const correlationId = crypto.randomUUID();
   const logger = createLogger(correlationId);
 
-  const configResult = (deps && 'config' in deps && deps.config)
+  // Authorize invocation before exposing configuration diagnostics.
+  // Probing unauthenticated requests must never leak missing or invalid variable names.
+  const taskSecret = deps?.config?.taskSecret ?? Deno.env.get('INDEXER_TASK_SECRET')?.trim();
+  const auth = authorizeInvocation(request.headers, taskSecret);
+  if (!auth.authorized) {
+    logger.warn('Rejected unauthorised indexer invocation', { reason: auth.reason });
+    return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
+  }
+
+  const configResult = deps?.config
     ? { ok: true as const, config: deps.config }
     : loadConfig();
   if (!configResult.ok) {
@@ -127,12 +136,6 @@ export async function handleRequest(
   }
 
   const config = configResult.config;
-
-  const auth = authorizeInvocation(request.headers, config.taskSecret);
-  if (!auth.authorized) {
-    logger.warn('Rejected unauthorised indexer invocation', { reason: auth.reason });
-    return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
-  }
 
   const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
   const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
