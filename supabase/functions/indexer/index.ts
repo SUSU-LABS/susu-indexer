@@ -91,6 +91,11 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
 /**
  * Recomputes each group's state from the facts on record, and writes it back.
  *
+ * The derivation is a single Postgres aggregation per group
+ * (`readDerivedGroupState`), not a re-read of every fact row: reconcile work
+ * stays bounded by the groups touched rather than growing with their lifetime
+ * histories.
+ *
  * Returns the figures that disagreed with what was stored. The derived values
  * are written either way, so this is a report rather than a decision: the repair
  * is the write that follows it.
@@ -101,8 +106,7 @@ async function reconcileGroups(
 ): Promise<string[]> {
   if (contractIds.length === 0) return [];
 
-  const facts = await withRetry(() => db.readGroupFacts(contractIds), RETRY);
-  const states = contractIds.map((id) => deriveGroupState(id, facts.get(id) ?? NO_FACTS));
+  const states = await withRetry(() => db.readDerivedGroupState(contractIds), RETRY);
 
   const stored = await withRetry(() => db.readGroupState(contractIds), RETRY);
   const divergences = states.flatMap((state) =>
