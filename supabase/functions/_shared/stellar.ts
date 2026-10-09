@@ -6,6 +6,8 @@
  * stays in the contracts.
  */
 
+import { sanitizeErrorMessage } from './sanitize.ts';
+
 export type RpcEvent = {
   /** Ledger the event was emitted in. */
   ledger: number;
@@ -122,11 +124,21 @@ export class SorobanRpcClient {
       params,
     });
 
-    const response = await fetch(this.#url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-    });
+    // A network failure throws a TypeError whose message includes the full
+    // request URL. Hosted RPC URLs commonly embed an API key or token, so the
+    // message is sanitized before it can reach logs, responses or the runs
+    // table. See _shared/sanitize.ts.
+    let response: Response;
+    try {
+      response = await fetch(this.#url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new RpcError(`RPC request failed: ${sanitizeErrorMessage(message)}`);
+    }
 
     if (!response.ok) {
       throw new RpcError(`RPC request failed with status ${response.status}`, response.status);
