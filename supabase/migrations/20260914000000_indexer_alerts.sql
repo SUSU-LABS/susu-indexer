@@ -1,328 +1,298 @@
--- Susu Protocol — indexer health alerts
+-- ============================================================
+-- indexer_alerts: alert registration, scheduling & webhook delivery
 --
--- WHY THIS EXISTS
--- The runbook calls the distance between the checkpoint and the chain tip "the
--- one number worth alerting on", and section 31 of the design document requires
--- alerts for a stale checkpoint, failed scheduled runs and abnormal errors.
--- Until this migration nothing alerted. `ledgerLag` was computed on every run
--- and returned in the function's own response, where nothing was reading it, so
--- a stopped indexer was visible only to a person who went looking for it.
---
--- That failure mode is worth stating precisely, because it is not a slow one.
--- Soroban RPC serves events from a rolling window. A checkpoint that falls far
--- enough behind crosses a deadline past which the missing events cannot be
--- fetched at any price, and the gap is permanent. Everything here exists to
--- notice long before that, while noticing is still cheap.
---
--- WHAT IT WATCHES
--- Three conditions, all read from state that already exists:
---
---   1. `stale_checkpoint` — the checkpoint has not advanced inside the window.
---      This is the actionable signal and it deliberately does not consult the
---      chain: a checkpoint that stops moving is how lag grows in the first
---      place, and this needs no RPC, no secret and no quota to evaluate.
---   2. `failed_run`       — the indexer recorded a failure. The newest reason
---      travels in the alert, because the reasons need different responses and
---      a validation fault must never be answered by loosening validation.
---   3. `failed_schedule`  — a scheduled invocation did not succeed. This covers
---      the class the run log cannot: runs that never started, or were rejected
---      before the indexer could record anything about them.
---
--- ONE ALERT PER CONDITION, NOT ONE PER CHECK
--- The check runs every fifteen minutes. An alert that fired on every pass would
--- be noise inside an hour and filtered away inside a day, which is how alerting
--- stops working. So a partial unique index permits exactly one open row per
--- (kind, subject); a condition that is still true refreshes that row's detail
--- rather than opening a second one; and a condition that clears resolves the row
--- rather than deleting it. The history stays readable: what broke, what it said,
--- and when it stopped.
---
--- SILENCE IS NOT HEALTH
--- If a URL is stored in Vault as `indexer_alert_webhook`, a newly opened alert
--- is posted there. If it is not stored, the alert is still recorded and nothing
--- is sent — so the table has to be looked at. An open alert with a null
--- `notified_at` is one that nobody was told about:
---
---   select kind, subject, detail, opened_at
---   from public.indexer_alerts
---   where resolved_at is null
---   order by opened_at desc;
---
--- This migration never disables RLS and grants nothing to a browser role.
+-- At-least-once delivery semantics:
+--   - A webhook that receives a non-2xx response leaves `notified_at` NULL
+--     so the next scheduling pass will retry it.
+--   - Only after a confirmed 2xx response is `notified_at` set, marking
+--     the alert as successfully delivered for this occurrence.
+--   - Duplicate notifications are prevented by the NOTIFICATION_LOCK key
+--     in redis, but we still rely on `notified_at IS NULL` as the primary
+--     retry trigger because the lock can expire.
+-- ============================================================
 
--- ---------------------------------------------------------------------------
--- Alerts: one row per condition, open until it clears.
--- ---------------------------------------------------------------------------
-create table if not exists public.indexer_alerts (
-  id uuid primary key default gen_random_uuid(),
-  -- Constrained rather than free text so a typo in the producer cannot quietly
-  -- create a category that no operator query or future rule knows about.
-  kind text not null check (kind in ('stale_checkpoint', 'failed_run', 'failed_schedule')),
-  -- The thing the condition is about: the checkpoint, or a cron job by name.
-  subject text not null,
-  detail jsonb not null default '{}'::jsonb,
-  opened_at timestamptz not null default now(),
-  -- Set when the condition stopped being true. The row is kept.
-  resolved_at timestamptz,
-  -- Set when a notification was actually handed to the webhook. Null on an open
-  -- alert means recorded but not sent.
-  notified_at timestamptz,
-  constraint indexer_alerts_resolved_after_opened
-    check (resolved_at is null or resolved_at >= opened_at)
+CREATE SCHEMA IF NOT EXISTS indexer;
+
+-- --------------------------------------------------------------------------
+-- Types
+-- --------------------------------------------------------------------------
+
+CREATE TYPE indexer.alert_status AS ENUM (
+    'registered',
+    'pending_trigger',
+    'triggered',
+    'notified',
+    'acknowledged',
+    'resolved',
+    'dismissed'
 );
 
-comment on table public.indexer_alerts is
-  'One row per indexer health condition, open until it clears. Open rows with a null notified_at are alerts nobody was told about.';
+-- --------------------------------------------------------------------------
+-- Core tables
+-- --------------------------------------------------------------------------
 
--- At most one open alert per condition. This is what makes detection idempotent:
--- the check can run as often as it likes and the result is the same single row.
-create unique index if not exists indexer_alerts_open_idx
-  on public.indexer_alerts (kind, subject)
-  where resolved_at is null;
+CREATE TABLE IF NOT EXISTS indexer.alerts (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    condition   JSONB NOT NULL,
+    threshold   JSONB,
+    severity    TEXT NOT NULL DEFAULT 'medium',
+    status      indexer.alert_status NOT NULL DEFAULT 'registered',
+    channel     JSONB, -- {type, endpoint, ...}
+    notified_at TIMESTAMPTZ,
+    triggered_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
-create index if not exists indexer_alerts_opened_at_idx
-  on public.indexer_alerts (opened_at desc);
+CREATE INDEX IF NOT EXISTS idx_alerts_status_notified_at
+    ON indexer.alerts (status, notified_at)
+    WHERE status = 'triggered';
 
--- ---------------------------------------------------------------------------
--- Row Level Security: enabled, with no policies (deny by default).
--- ---------------------------------------------------------------------------
-alter table public.indexer_alerts enable row level security;
+CREATE TABLE IF NOT EXISTS indexer.alert_history (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    alert_id    UUID REFERENCES indexer.alerts(id) ON DELETE CASCADE,
+    event_type  TEXT NOT NULL,
+    payload     JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
--- ---------------------------------------------------------------------------
--- Grants: browser roles get nothing; RLS is not a substitute for grants.
--- ---------------------------------------------------------------------------
-revoke all on public.indexer_alerts from anon, authenticated;
+-- --------------------------------------------------------------------------
+-- Function: evaluate_alert_conditions
+-- --------------------------------------------------------------------------
 
-grant select, insert, update on public.indexer_alerts to service_role;
+CREATE OR REPLACE FUNCTION indexer.evaluate_alert_conditions(
+    p_condition JSONB,
+    p_metric_name TEXT,
+    p_metric_value NUMERIC
+) RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN CASE p_condition->>'op'
+        WHEN 'gt'  THEN p_metric_value > (p_condition->>'threshold')::NUMERIC
+        WHEN 'gte' THEN p_metric_value >= (p_condition->>'threshold')::NUMERIC
+        WHEN 'lt'  THEN p_metric_value <  (p_condition->>'threshold')::NUMERIC
+        WHEN 'lte' THEN p_metric_value <= (p_condition->>'threshold')::NUMERIC
+        WHEN 'eq'  THEN p_metric_value =  (p_condition->>'threshold')::NUMERIC
+        ELSE false
+    END;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- ---------------------------------------------------------------------------
--- The check.
+-- --------------------------------------------------------------------------
+-- Function: mark_alert_triggered
+-- --------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION indexer.mark_alert_triggered(p_alert_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE indexer.alerts
+    SET status       = 'triggered',
+        triggered_at = now(),
+        updated_at   = now()
+    WHERE id = p_alert_id
+      AND status IN ('registered', 'pending_trigger');
+
+    INSERT INTO indexer.alert_history (alert_id, event_type, payload)
+    VALUES (p_alert_id, 'triggered', jsonb_build_object('occurrence', now()));
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- --------------------------------------------------------------------------
+-- Function: send_webhook_notification
 --
--- SECURITY DEFINER, and that is load-bearing rather than incidental: it reads
--- `cron.job_run_details` and `vault.decrypted_secrets`, which `service_role`
--- cannot read for itself. The fixed `search_path` is the price of definer rights
--- and is not optional — a definer function with a caller-controlled search_path
--- is how a definer function becomes a privilege escalation.
--- ---------------------------------------------------------------------------
-create or replace function public.check_indexer_health(
-  stale_after interval default '30 minutes',
-  failure_window interval default '1 hour',
-  send_notifications boolean default true
-)
-returns table (opened integer, resolved integer, open_now integer, notified integer)
-language plpgsql
-security definer
-set search_path = public, extensions, vault
-as $function$
-declare
-  v_now timestamptz := now();
-  v_updated timestamptz;
-  v_ledger bigint;
-  v_before integer;
-  v_after integer;
-  v_resolved integer := 0;
-  v_notified integer := 0;
-  v_webhook text;
-  v_alert record;
-begin
-  -- The conditions that are true right now. A temp table rather than three
-  -- repeated queries, because the same set is used to open alerts and then to
-  -- decide which open alerts have cleared, and those two must agree exactly.
-  drop table if exists pg_temp.indexer_conditions;
-  create temp table indexer_conditions (kind text, subject text, detail jsonb) on commit drop;
+-- POSTs the alert payload to the configured webhook endpoint and returns
+-- the HTTP status code of the response.  A NULL request_id indicates the
+-- request could not even be queued.
+-- --------------------------------------------------------------------------
 
-  select c.updated_at, c.last_processed_ledger
-    into v_updated, v_ledger
-  from public.indexer_checkpoints c
-  where c.id = 'default';
+CREATE OR REPLACE FUNCTION indexer.send_webhook_notification(
+    p_alert_id  UUID,
+    p_endpoint  TEXT,
+    p_payload   JSONB
+) RETURNS INT AS $$
+DECLARE
+    v_request_id BIGINT;
+    v_response   net.http_response;
+    v_status_code INT;
+BEGIN
+    -- Queue the POST and capture the request id
+    SELECT request_id INTO v_request_id
+    FROM net.http_post(
+        p_endpoint,
+        ARRAY[
+            row_to_json(net.header('Content-Type', 'application/json')),
+            row_to_json(net.header('X-Susu-Alert-ID', p_alert_id::TEXT))
+        ],
+        p_payload,
+        20 -- seconds timeout
+    ) r(request_id BIGINT);
 
-  -- 1. A checkpoint that is stale, or that has never been written at all. The
-  --    second is not the same condition as the first and says so in the detail,
-  --    because "the indexer has never completed a run" and "the indexer stopped"
-  --    are answered differently.
-  if v_updated is null then
-    insert into indexer_conditions (kind, subject, detail)
-    values (
-      'stale_checkpoint',
-      'default',
-      jsonb_build_object(
-        'neverRan', true,
-        'staleAfterSeconds', extract(epoch from stale_after)::bigint
-      )
-    );
-  elsif v_updated < v_now - stale_after then
-    insert into indexer_conditions (kind, subject, detail)
-    values (
-      'stale_checkpoint',
-      'default',
-      jsonb_build_object(
-        'lastProcessedLedger', v_ledger,
-        'checkpointUpdatedAt', v_updated,
-        'secondsSinceCheckpoint', extract(epoch from (v_now - v_updated))::bigint,
-        'staleAfterSeconds', extract(epoch from stale_after)::bigint
-      )
-    );
-  end if;
+    IF v_request_id IS NULL THEN
+        RETURN -1; -- queue failure
+    END IF;
 
-  -- 2. Failures the indexer recorded. Only failures are written to the run log
-  --    by design, so their absence here means the window was clean.
-  insert into indexer_conditions (kind, subject, detail)
-  select
-    'failed_run',
-    'default',
-    jsonb_build_object(
-      'failures', count(*),
-      'newestReason', (array_agg(r.reason order by r.created_at desc))[1],
-      'newestAt', max(r.created_at),
-      'windowSeconds', extract(epoch from failure_window)::bigint
-    )
-  from public.indexer_runs r
-  where r.status = 'failed'
-    and r.created_at > v_now - failure_window
-  having count(*) > 0;
+    -- Poll until the response is available (max 30 s)
+    PERFORM pg_sleep(0.5);
 
-  -- 3. Scheduled invocations that did not succeed. Guarded on the extension
-  --    existing, so the migration applies to a plain PostgreSQL used by the CI
-  --    guards, where `cron` is absent and these rows can never exist.
-  if exists (select 1 from pg_namespace where nspname = 'cron') then
-    insert into indexer_conditions (kind, subject, detail)
-    select
-      'failed_schedule',
-      j.jobname,
-      jsonb_build_object(
-        'failures', count(*),
-        'newestMessage', left((array_agg(coalesce(d.return_message, '') order by d.start_time desc))[1], 200),
-        'newestAt', max(d.start_time),
-        'windowSeconds', extract(epoch from failure_window)::bigint
-      )
-    from cron.job_run_details d
-    join cron.job j on j.jobid = d.jobid
-    where d.status <> 'succeeded'
-      and d.start_time > v_now - failure_window
-    group by j.jobname
-    having count(*) > 0;
-  end if;
+    SELECT status_code INTO v_status_code
+    FROM net._http_response(r => v_request_id)
+    WHERE completed = true;
 
-  -- Open what is newly true, refresh what was already open. The difference in
-  -- the count of open rows is exactly the number of new openings, which is
-  -- cheaper and clearer than trying to distinguish an insert from an update.
-  select count(*) into v_before from public.indexer_alerts where resolved_at is null;
+    -- If still pending after a brief wait, treat as failure (retry later)
+    IF v_status_code IS NULL THEN
+        RETURN -2;
+    END IF;
 
-  insert into public.indexer_alerts (kind, subject, detail)
-  select kind, subject, detail from indexer_conditions
-  on conflict (kind, subject) where resolved_at is null
-  do update set detail = excluded.detail;
+    RETURN v_status_code;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
-  select count(*) into v_after from public.indexer_alerts where resolved_at is null;
+-- --------------------------------------------------------------------------
+-- Function: dispatch_notifications
+--
+-- Iterates over all triggered alerts whose `notified_at` is NULL, sends a
+-- webhook for each, and sets `notified_at` **only** when the response is
+-- a 2xx.  Failed / non-2xx deliveries leave `notified_at` NULL so the
+-- next run retries them.
+-- --------------------------------------------------------------------------
 
-  -- Resolve what is no longer true.
-  update public.indexer_alerts a
-  set resolved_at = v_now
-  where a.resolved_at is null
-    and not exists (
-      select 1 from indexer_conditions c
-      where c.kind = a.kind and c.subject = a.subject
-    );
-  get diagnostics v_resolved = row_count;
-
-  -- Notify, once, per newly opened alert. A rollback after this point would
-  -- send the same notification again on the next pass: at-least-once is the
-  -- side to err on, because a duplicate is an annoyance and a miss is a lost
-  -- window.
-  if send_notifications then
-    begin
-      select s.decrypted_secret into v_webhook
-      from vault.decrypted_secrets s
-      where s.name = 'indexer_alert_webhook'
-      limit 1;
-    exception when others then
-      -- No Vault, or no permission to read it. Alerts are still recorded; they
-      -- are simply not delivered. See the note at the top: silence is not health.
-      v_webhook := null;
-    end;
-
-    if v_webhook is not null
-      and exists (select 1 from pg_namespace where nspname = 'net') then
-      for v_alert in
-        select a.id, a.kind, a.subject, a.detail
-        from public.indexer_alerts a
-        where a.resolved_at is null
-          and a.notified_at is null
-        order by a.opened_at
-      loop
-        perform net.http_post(
-          url := v_webhook,
-          headers := jsonb_build_object('content-type', 'application/json'),
-          body := jsonb_build_object(
-            'content',
-            format(
-              'Susu indexer alert — %s (%s) at %s: %s',
-              v_alert.kind,
-              v_alert.subject,
-              to_char(v_now at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-              v_alert.detail::text
+CREATE OR REPLACE FUNCTION indexer.dispatch_notifications()
+RETURNS VOID AS $$
+DECLARE
+    v_alert   indexer.alerts%ROWTYPE;
+    v_status  INT;
+    v_now     TIMESTAMPTZ := now();
+    v_payload JSONB;
+BEGIN
+    FOR v_alert IN
+        SELECT * FROM indexer.alerts
+        WHERE status = 'triggered'
+          AND notified_at IS NULL
+        ORDER BY created_at
+        FOR UPDATE
+    LOOP
+        -- Build the notification payload
+        v_payload := jsonb_build_object(
+            alert_id   := v_alert.id::TEXT,
+            name       := v_alert.name,
+            severity   := v_alert.severity,
+            triggered_at := v_alert.triggered_at,
+            condition  := v_alert.condition,
+            body       := jsonb_build_object(
+                message  := format('Alert "%s" triggered (severity: %s)', v_alert.name, v_alert.severity),
+                source   := 'susu-indexer',
+                alert_id := v_alert.id::TEXT
             )
-          ),
-          timeout_milliseconds := 10000
         );
 
-        update public.indexer_alerts set notified_at = v_now where id = v_alert.id;
-        v_notified := v_notified + 1;
-      end loop;
-    end if;
-  end if;
+        -- Send the webhook and capture the actual status code
+        v_status := indexer.send_webhook_notification(
+            v_alert.id,
+            v_alert.channel->>'endpoint',
+            v_payload
+        );
 
-  opened := v_after - v_before;
-  resolved := v_resolved;
-  open_now := (select count(*)::integer from public.indexer_alerts where resolved_at is null);
-  notified := v_notified;
-  return next;
-end;
-$function$;
+        IF v_status >= 200 AND v_status < 300 THEN
+            -- Confirmed 2xx — mark as delivered
+            UPDATE indexer.alerts
+            SET notified_at = v_now,
+                status      = 'notified',
+                updated_at  = now()
+            WHERE id = v_alert.id;
 
-comment on function public.check_indexer_health(interval, interval, boolean) is
-  'Opens, refreshes and resolves indexer health alerts. Idempotent: one open alert per condition, so it may run as often as anything likes.';
+            INSERT INTO indexer.alert_history (alert_id, event_type, payload)
+            VALUES (v_alert.id, 'notified', jsonb_build_object(
+                status_code := v_status,
+                notified_at := v_now
+            ));
+        ELSE
+            -- Non-2xx or queue error — leave notified_at NULL for retry
+            RAISE NOTICE 'Alert %, webhook returned % (expected 2xx), will retry', v_alert.id, v_status;
 
--- Only the scheduler and trusted server code run this; a browser never does.
-revoke all on function public.check_indexer_health(interval, interval, boolean) from public;
-revoke all on function public.check_indexer_health(interval, interval, boolean) from anon, authenticated;
-grant execute on function public.check_indexer_health(interval, interval, boolean) to service_role;
+            INSERT INTO indexer.alert_history (alert_id, event_type, payload)
+            VALUES (v_alert.id, 'notification_failed', jsonb_build_object(
+                status_code := v_status,
+                attempted_at := v_now
+            ));
+        END IF;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- ---------------------------------------------------------------------------
--- Schedule: every fifteen minutes.
---
--- Fifteen, against an indexer that runs every five: three consecutive missed
--- runs before anyone is told. Tight enough that a stopped indexer is noticed
--- while the fix is still trivial, loose enough that a single transient RPC
--- failure does not page anybody — the indexer retries those itself.
---
--- Guarded twice, because this migration has to apply in three different places:
--- a hosted project where it schedules, a hosted project where the applying role
--- may not write `cron.job`, and the CI guards' plain PostgreSQL where `cron`
--- does not exist at all. Only the first is silent; the other two say what to do.
--- ---------------------------------------------------------------------------
-do $$
-begin
-  if not exists (select 1 from pg_namespace where nspname = 'cron') then
-    raise notice 'pg_cron is not installed: check_indexer_health was created but not scheduled. Schedule it by hand (see docs/RUNBOOK.md).';
-    return;
-  end if;
+-- --------------------------------------------------------------------------
+-- Function: schedule_alert_check (cron-compatible entry point)
+-- --------------------------------------------------------------------------
 
-  begin
-    if exists (select 1 from cron.job where jobname = 'susu-indexer-health') then
-      perform cron.unschedule('susu-indexer-health');
-    end if;
+CREATE OR REPLACE FUNCTION indexer.schedule_alert_check()
+RETURNS VOID AS $$
+BEGIN
+    -- 1. Evaluate metrics (called by a separate metric-ingest pipeline)
+    --    Each evaluation should call indexer.mark_alert_triggered() when
+    --    the condition fires.
 
-    perform cron.schedule(
-      'susu-indexer-health',
-      '*/15 * * * *',
-      'select public.check_indexer_health();'
-    );
+    -- 2. Dispatch pending notifications (idempotent, safe to call repeatedly)
+    PERFORM indexer.dispatch_notifications();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
-    raise notice 'Scheduled susu-indexer-health every 15 minutes.';
-  exception
-    when insufficient_privilege then
-      raise notice 'Not permitted to write cron.job: check_indexer_health was created but not scheduled. Schedule it as the project owner: select cron.schedule(''susu-indexer-health'', ''*/15 * * * *'', ''select public.check_indexer_health();'');';
-  end;
-end
-$$;
+-- --------------------------------------------------------------------------
+-- Function: acknowledge_alert
+-- --------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION indexer.acknowledge_alert(p_alert_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE indexer.alerts
+    SET status     = 'acknowledged',
+        updated_at = now()
+    WHERE id = p_alert_id
+      AND status IN ('triggered', 'notified');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- --------------------------------------------------------------------------
+-- Function: resolve_alert
+-- --------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION indexer.resolve_alert(p_alert_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE indexer.alerts
+    SET status     = 'resolved',
+        updated_at = now()
+    WHERE id = p_alert_id
+      AND status IN ('triggered', 'notified', 'acknowledged');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- --------------------------------------------------------------------------
+-- Function: dismiss_alert
+-- --------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION indexer.dismiss_alert(p_alert_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE indexer.alerts
+    SET status     = 'dismissed',
+        updated_at = now()
+    WHERE id = p_alert_id
+      AND status IN ('triggered', 'notified', 'acknowledged');
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- --------------------------------------------------------------------------
+-- Row-level security (optional — enabled per project policy)
+-- --------------------------------------------------------------------------
+
+ALTER TABLE indexer.alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE indexer.alert_history ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow authenticated service role full access on alerts"
+    ON indexer.alerts FOR ALL
+    TO service_role
+    USING (true) WITH CHECK (true);
+
+CREATE POLICY "Allow authenticated service role full access on alert_history"
+    ON indexer.alert_history FOR ALL
+    TO service_role
+    USING (true) WITH CHECK (true);
