@@ -31,13 +31,28 @@ succeed at all, and the events that fell out of the window are gone permanently.
 
 The lag above is the number that matters, so something has to be watching it rather than waiting for
 someone to look. `public.check_indexer_health()` runs every fifteen minutes under the
-`susu-indexer-health` cron job and watches three conditions:
+`susu-indexer-health` cron job and watches four conditions:
 
 | Kind               | What it means                                                             |
 | ------------------ | ------------------------------------------------------------------------- |
 | `stale_checkpoint` | The checkpoint has not advanced in 30 minutes — three missed runs         |
 | `failed_run`       | The indexer recorded a failure in the last hour, with its reason          |
 | `failed_schedule`  | A scheduled invocation did not succeed, including ones that never started |
+| `ledger_lag`       | The chain tip is more than 60,000 ledgers ahead of the checkpoint         |
+
+`ledger_lag` is the one the other three cannot see: a checkpoint that advances on every run is never
+stale, yet the distance to the tip can grow without bound until the retention window closes over the
+gap. The threshold sits at half the 7-day / ~120,000-ledger window — about 3.5 days of lag — so the
+alert fires while catching up is still a matter of running, not rebuilding. It is the
+`lag_threshold_ledgers` parameter of `check_indexer_health`, so operators can tighten it without a
+migration. The indexer records the tip it observed on every run, including runs that indexed
+nothing, so the comparison never goes stale while the indexer itself is healthy.
+
+Recovery is the same procedure as
+[the checkpoint fell behind the RPC's retention window](#the-checkpoint-fell-behind-the-rpcs-retention-window):
+confirm how far behind the checkpoint is, let the indexer catch up if the gap is still inside the
+window, and if the gap already crossed the floor, reset the checkpoint to the floor and record the
+permanently missing range.
 
 Staleness is checked before lag on purpose. It needs no RPC, no secret and no quota, and a
 checkpoint that stops moving is how lag grows in the first place — so this notices the problem while
