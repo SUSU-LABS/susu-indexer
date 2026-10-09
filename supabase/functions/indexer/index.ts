@@ -165,6 +165,10 @@ export async function handleRequest(
 
     if (range === null) {
       logger.info('Nothing to index', { latestLedger });
+      // The tip was still observed. Without this write the lag alert's input
+      // freezes at the last indexing run and goes stale exactly when the
+      // indexer looks idle but healthy.
+      await withRetry(() => db.recordLatestLedger(latestLedger), RETRY);
       return jsonResponse(
         {
           status: 'skipped',
@@ -291,6 +295,7 @@ export async function handleRequest(
           db.advanceCheckpoint({
             lastProcessedLedger: range.to,
             startLedger: checkpoint?.startLedger ?? config.startLedger,
+            lastSeenLatestLedger: latestLedger,
           }),
         RETRY,
       );

@@ -489,10 +489,16 @@ export class IndexerDb {
    * Guards against regression in the database as well as in code: the update
    * only applies when the new ledger is strictly greater, so concurrent runs
    * cannot move the checkpoint backwards.
+   *
+   * The observed chain tip travels with the checkpoint because the lag alert
+   * (`check_indexer_health`) compares the two. A run that indexed nothing
+   * still observed the tip, so callers pass it here too rather than leaving
+   * the comparison to go stale.
    */
   async advanceCheckpoint(params: {
     lastProcessedLedger: number;
     startLedger: number;
+    lastSeenLatestLedger?: number;
   }): Promise<void> {
     const { data, error } = await this.#client
       .from('indexer_checkpoints')
@@ -524,6 +530,9 @@ export class IndexerDb {
           last_processed_ledger: params.lastProcessedLedger,
           start_ledger: params.startLedger,
           updated_at: new Date().toISOString(),
+          ...(params.lastSeenLatestLedger !== undefined
+            ? { last_seen_latest_ledger: params.lastSeenLatestLedger }
+            : {}),
         },
         { onConflict: 'id', ignoreDuplicates: true },
       );
@@ -546,6 +555,33 @@ export class IndexerDb {
 
     if (recheckError) {
       throw new Error(`Failed to advance indexer checkpoint: ${recheckError.message}`);
+    }
+  }
+
+  /**
+   * Records the chain tip observed by a run that indexed nothing.
+   *
+   * The checkpoint row is the lag alert's input, and a skipped run still
+   * observed the tip — without this write, `last_seen_latest_ledger` would
+   * freeze at the last indexing run and the lag comparison would go stale
+   * exactly when the indexer looks idle but healthy.
+   *
+   * A plain update, not an upsert: with no checkpoint row yet there is no lag
+   * to measure (the stale_checkpoint "never ran" condition owns that case),
+   * and inventing `last_processed_ledger`/`start_ledger` values here would be
+   * worse than writing nothing.
+   */
+  async recordLatestLedger(latestLedger: number): Promise<void> {
+    const { error } = await this.#client
+      .from('indexer_checkpoints')
+      .update({
+        last_seen_latest_ledger: latestLedger,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', 'default');
+
+    if (error) {
+      throw new Error(`Failed to record latest ledger: ${error.message}`);
     }
   }
 
