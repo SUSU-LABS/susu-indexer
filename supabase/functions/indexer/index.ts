@@ -30,12 +30,21 @@ import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_sha
 import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { withRetry } from '../_shared/retry.ts';
-import { fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
 const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
+
+/**
+ * The slice of the RPC client the request handler needs: what the scan needs,
+ * plus the chain head. Narrow on purpose, so tests can script it without
+ * standing up a network server.
+ */
+export type RpcSource = EventSource & {
+  getLatestLedger(): Promise<number>;
+};
 
 type RunSummary = {
   status: 'ok' | 'skipped' | 'failed';
@@ -75,6 +84,11 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
 /**
  * Recomputes each group's state from the facts on record, and writes it back.
  *
+ * The derivation is a single Postgres aggregation per group
+ * (`readDerivedGroupState`), not a re-read of every fact row: reconcile work
+ * stays bounded by the groups touched rather than growing with their lifetime
+ * histories.
+ *
  * Returns the figures that disagreed with what was stored. The derived values
  * are written either way, so this is a report rather than a decision: the repair
  * is the write that follows it.
@@ -85,8 +99,7 @@ async function reconcileGroups(
 ): Promise<string[]> {
   if (contractIds.length === 0) return [];
 
-  const facts = await withRetry(() => db.readGroupFacts(contractIds), RETRY);
-  const states = contractIds.map((id) => deriveGroupState(id, facts.get(id) ?? NO_FACTS));
+  const states = await withRetry(() => db.readDerivedGroupState(contractIds), RETRY);
 
   const stored = await withRetry(() => db.readGroupState(contractIds), RETRY);
   const divergences = states.flatMap((state) =>
@@ -98,7 +111,10 @@ async function reconcileGroups(
   return divergences;
 }
 
-export async function handleRequest(request: Request): Promise<Response> {
+export async function handleRequest(
+  request: Request,
+  deps: { db?: IndexerDb; rpc?: RpcSource } = {},
+): Promise<Response> {
   const correlationId = crypto.randomUUID();
   const logger = createLogger(correlationId);
 
@@ -120,8 +136,8 @@ export async function handleRequest(request: Request): Promise<Response> {
     return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
   }
 
-  const db = new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
-  const rpc = new SorobanRpcClient(config.rpcUrl);
+  const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
+  const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
 
   try {
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
@@ -287,5 +303,9 @@ export async function handleRequest(request: Request): Promise<Response> {
   }
 }
 
-// Supabase Edge Functions run this module as the request handler.
-Deno.serve(handleRequest);
+// Supabase Edge Functions run this module as the request handler. Guarded so
+// importing the module (e.g. in tests) does not start a server: the platform
+// executes the entrypoint file as the main module, where this is true.
+if (import.meta.main) {
+  Deno.serve((request) => handleRequest(request));
+}

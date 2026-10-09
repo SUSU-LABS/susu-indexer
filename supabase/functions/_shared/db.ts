@@ -47,10 +47,16 @@ export type IndexedEventRow = {
 export class IndexerDb {
   #client: SupabaseClient;
 
-  constructor(supabaseUrl: string, serviceRoleKey: string) {
-    this.#client = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+  /**
+   * An explicit client may be injected for tests, so the orchestration can be
+   * exercised against a stub instead of a live database. Production callers
+   * omit it and get the service-role client as before.
+   */
+  constructor(supabaseUrl: string, serviceRoleKey: string, client?: SupabaseClient) {
+    this.#client = client ??
+      createClient(supabaseUrl, serviceRoleKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
   }
 
   /**
@@ -251,6 +257,51 @@ export class IndexerDb {
     }
 
     return facts;
+  }
+
+  /**
+   * Derives each group's state with one Postgres aggregation per group.
+   *
+   * This is the bounded-cost replacement for `readGroupFacts` + `deriveGroupState`
+   * in the reconcile path: the `derive_group_state` RPC returns one row per
+   * requested contract, however many fact rows sit behind it, so reconcile work
+   * stays bounded by the groups touched rather than growing with their lifetime
+   * histories. The aggregates mirror `deriveGroupState` field for field — the
+   * equivalence test in `tests/` pins that — including `COALESCE` to the same
+   * zero values an empty fact set derives to.
+   *
+   * Wide integers cross PostgREST as `text`, for the same reason the fact
+   * readers cast money columns: PostgREST renders `numeric` and `bigint` as
+   * JSON numbers and JavaScript would silently round past 2^53. The inputs are
+   * already `numeric(39,0)` in Postgres, so no string-shape validation is
+   * needed the way `sumAmounts` does it for JSON input; the `::text` casts in
+   * the function are the exactness guarantee here.
+   */
+  async readDerivedGroupState(contractIds: readonly string[]): Promise<GroupState[]> {
+    if (contractIds.length === 0) return [];
+
+    const { data, error } = await this.#client.rpc('derive_group_state', {
+      p_contract_ids: [...contractIds],
+    });
+
+    if (error) {
+      throw new Error(`Failed to derive group state: ${error.message}`);
+    }
+
+    return ((data ?? []) as Record<string, unknown>[]).map((row) => ({
+      contract_id: String(row['contract_id']),
+      // `completed` outranks `start`: same precedence as `deriveGroupState`.
+      status: (row['completed'] ? 'completed' : row['started'] ? 'active' : 'open') as GroupState[
+        'status'
+      ],
+      member_count: Number(row['member_count']),
+      current_round: Number(row['current_round']),
+      completed_rounds: Number(row['completed_rounds']),
+      contributed_total: String(row['contributed_total']),
+      paid_out_total: String(row['paid_out_total']),
+      fee_total: String(row['fee_total']),
+      last_event_ledger: Number(row['last_event_ledger']),
+    }));
   }
 
   /** Reads the derived state currently stored for the given groups. */

@@ -3,6 +3,8 @@
   "specifiers": {
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.14",
+    "npm:@electric-sql/pglite@*": "0.5.8",
+    "npm:@electric-sql/pglite@0.5.8": "0.5.8",
     "npm:@stellar/stellar-sdk@17.0.1": "17.0.1",
     "npm:@supabase/supabase-js@2.116.0": "2.116.0"
   },
@@ -18,6 +20,9 @@
     }
   },
   "npm": {
+    "@electric-sql/pglite@0.5.8": {
+      "integrity": "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q=="
+    },
     "@exodus/bytes@1.15.1_@noble+hashes@2.4.0": {
       "integrity": "sha512-S6mL0yNB/Abt9Ei4tq8gDhcczc4S3+vQ4ra7vxnAf+YHC02srtqxKKZghx2Dq6p0e66THKwR6r8N6P95wEty7Q==",
       "dependencies": [
