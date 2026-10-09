@@ -22,8 +22,8 @@
 
 import { authorizeInvocation } from '../_shared/auth.ts';
 import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
-import { loadConfig } from '../_shared/config.ts';
-import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
+import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
+import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
 import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
@@ -31,7 +31,7 @@ import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState } from '../_shared/state.ts';
+import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -44,6 +44,13 @@ const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
  */
 export type RpcSource = EventSource & {
   getLatestLedger(): Promise<number>;
+};
+
+type RequestDependencies = {
+  db?: IndexerDb;
+  rpc?: RpcSource;
+  config?: IndexerConfig;
+  env?: Record<string, string | undefined>;
 };
 
 type RunSummary = {
@@ -113,12 +120,23 @@ async function reconcileGroups(
 
 export async function handleRequest(
   request: Request,
-  deps: { db?: IndexerDb; rpc?: RpcSource } = {},
+  deps: RequestDependencies = {},
 ): Promise<Response> {
   const correlationId = crypto.randomUUID();
   const logger = createLogger(correlationId);
 
-  const configResult = loadConfig();
+  const rawTaskSecret = deps.config?.taskSecret ??
+    (deps.env ? deps.env['INDEXER_TASK_SECRET'] : Deno.env.get('INDEXER_TASK_SECRET'));
+  const taskSecret = rawTaskSecret?.trim() || undefined;
+  const auth = authorizeInvocation(request.headers, taskSecret);
+  if (!auth.authorized) {
+    logger.warn('Rejected unauthorised indexer invocation', { reason: auth.reason });
+    return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
+  }
+
+  const configResult = deps.config
+    ? { ok: true as const, config: deps.config }
+    : loadConfig(deps.env);
   if (!configResult.ok) {
     // Report which variables are problematic — never their values.
     const reason = `invalid configuration (missing: ${
@@ -130,14 +148,13 @@ export async function handleRequest(
 
   const config = configResult.config;
 
-  const auth = authorizeInvocation(request.headers, config.taskSecret);
-  if (!auth.authorized) {
-    logger.warn('Rejected unauthorised indexer invocation', { reason: auth.reason });
-    return jsonResponse({ status: 'failed', correlationId, reason: 'unauthorized' }, 401);
-  }
-
   const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
   const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
+
+  // Hoisted out of the try so the catch block can report the ledger range the
+  // run had actually reached when it failed. Until the range is computed it
+  // stays null, and a failure before that is recorded as an unknown range.
+  let failedRange: { from: number; to: number } | null = null;
 
   try {
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
@@ -152,6 +169,10 @@ export async function handleRequest(
 
     if (range === null) {
       logger.info('Nothing to index', { latestLedger });
+      // The tip was still observed. Without this write the lag alert's input
+      // freezes at the last indexing run and goes stale exactly when the
+      // indexer looks idle but healthy.
+      await withRetry(() => db.recordLatestLedger(latestLedger), RETRY);
       return jsonResponse(
         {
           status: 'skipped',
@@ -162,6 +183,8 @@ export async function handleRequest(
         200,
       );
     }
+
+    failedRange = { from: range.from, to: range.to };
 
     logger.info('Indexing ledger range', {
       ledgerFrom: range.from,
@@ -213,8 +236,11 @@ export async function handleRequest(
 
     // Both passes are deduplicated by chain identity, so the overlap that a
     // retried range can produce collapses to one write per event.
+    // Events from failed contract calls are never indexed (stellar.ts:35-42).
     const raw = dedupeByIdentity(
-      [...firstPass, ...secondPass].sort(compareEventOrder),
+      [...firstPass, ...secondPass]
+        .filter((event) => event.successful === true)
+        .sort(compareEventOrder),
       buildEventIdentity,
     );
     const secondDecoded = decodeChainEvents(secondPass);
@@ -233,10 +259,25 @@ export async function handleRequest(
       });
     }
 
+    // Persist every rejection before the checkpoint can move. A decoder miss is
+    // the highest-consequence silent failure — it can hide a real contribution
+    // or payout — so it is written durably (and alerted on by the health check)
+    // rather than left as a truncated log line.
+    const rejectedRows: RejectedEventRow[] = rejected.map((item) => ({
+      event_id: item.eventId,
+      ledger: item.ledger,
+      tx_hash: item.txHash,
+      tx_index: item.txIndex,
+      event_index: item.eventIndex,
+      contract_id: item.contractId,
+      reason: item.reason,
+    }));
+
     // Groups before events: every other fact refers to a group row, and in the
     // range that discovers a group, both arrive together.
     await withRetry(() => db.upsertGroups(newGroups), RETRY);
     await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), RETRY);
+    await withRetry(() => db.recordRejectedEvents(correlationId, rejectedRows), RETRY);
 
     const plan = planIngest(decoded);
     await withRetry(() => db.persistPlan(plan), RETRY);
@@ -258,6 +299,7 @@ export async function handleRequest(
           db.advanceCheckpoint({
             lastProcessedLedger: range.to,
             startLedger: checkpoint?.startLedger ?? config.startLedger,
+            lastSeenLatestLedger: latestLedger,
           }),
         RETRY,
       );
@@ -292,12 +334,18 @@ export async function handleRequest(
 
     // Record the failure for operators. The checkpoint is deliberately left
     // untouched so the same range is retried on the next run.
-    await db.recordRunFailure({
-      correlationId,
-      ledgerFrom: 0,
-      ledgerTo: 0,
-      reason,
-    });
+    try {
+      await db.recordRunFailure({
+        correlationId,
+        ledgerFrom: failedRange?.from ?? 0,
+        ledgerTo: failedRange?.to ?? 0,
+        reason,
+      });
+    } catch (recordError) {
+      logger.error('Failed to record run failure in database', {
+        reason: recordError instanceof Error ? recordError.message : String(recordError),
+      });
+    }
 
     return jsonResponse({ status: 'failed', correlationId, reason }, 500);
   }

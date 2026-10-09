@@ -31,13 +31,14 @@ succeed at all, and the events that fell out of the window are gone permanently.
 
 The lag above is the number that matters, so something has to be watching it rather than waiting for
 someone to look. `public.check_indexer_health()` runs every fifteen minutes under the
-`susu-indexer-health` cron job and watches three conditions:
+`susu-indexer-health` cron job and watches four conditions:
 
-| Kind               | What it means                                                             |
-| ------------------ | ------------------------------------------------------------------------- |
-| `stale_checkpoint` | The checkpoint has not advanced in 30 minutes — three missed runs         |
-| `failed_run`       | The indexer recorded a failure in the last hour, with its reason          |
-| `failed_schedule`  | A scheduled invocation did not succeed, including ones that never started |
+| Kind               | What it means                                                                |
+| ------------------ | ---------------------------------------------------------------------------- |
+| `stale_checkpoint` | The checkpoint has not advanced in 30 minutes — three missed runs            |
+| `failed_run`       | The indexer recorded a failure in the last hour, with its reason             |
+| `rejected_events`  | The decoder refused an event in the last hour — the interface may have moved |
+| `failed_schedule`  | A scheduled invocation did not succeed, including ones that never started    |
 
 Staleness is checked before lag on purpose. It needs no RPC, no secret and no quota, and a
 checkpoint that stops moving is how lag grows in the first place — so this notices the problem while

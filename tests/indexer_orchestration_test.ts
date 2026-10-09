@@ -82,64 +82,9 @@ class StubSupabaseClient {
   callsTo(table: string, op: StubCall['op']): StubCall[] {
     return this.calls.filter((c) => c.table === table && c.op === op);
   }
-
-  /**
-   * The one RPC the indexer uses: `derive_group_state`.
-   *
-   * Aggregates the in-memory fact tables the way the SQL function does, so the
-   * orchestration tests exercise the new reconcile path instead of the old
-   * full-row reads. The SQL itself is pinned against `deriveGroupState` by the
-   * PGlite tests in `derive_group_state_test.ts`; this is only the transport
-   * stand-in. Recorded as a `select` so the "nothing but reads" assertions
-   * keep their meaning.
-   */
-  rpc(fn: string, args: Record<string, unknown>): Promise<{ data: Row[]; error: null }> {
-    if (fn !== 'derive_group_state') {
-      return Promise.reject(new Error(`stub: unexpected rpc ${fn}`));
-    }
-    this.calls.push({ table: 'derive_group_state', op: 'select' });
-    const ids = args['p_contract_ids'] as string[];
-    return Promise.resolve({
-      data: ids.map((id) => deriveRowFor(id, this.tables)),
-      error: null,
-    });
-  }
 }
 
-/**
- * The `derive_group_state` SQL function, in JavaScript, over stub tables.
- *
- * Shapes the row exactly like the function's `RETURNS TABLE`: wide integers
- * as text (the `::text` casts), rounds as integers, lifecycle as booleans.
- */
-function deriveRowFor(contractId: string, tables: Map<string, Row[]>): Row {
-  const inGroup = (row: Row) => row['contract_id'] === contractId;
-  const members = (tables.get('group_members') ?? []).filter(inGroup);
-  const contributions = (tables.get('contributions') ?? []).filter(inGroup);
-  const payouts = (tables.get('payouts') ?? []).filter(inGroup);
-  const fees = (tables.get('protocol_fees') ?? []).filter(inGroup);
-  const events = (tables.get('decoded_events') ?? []).filter(inGroup);
-
-  const maxRound = (rows: Row[]): number =>
-    rows.reduce((m, r) => Math.max(m, Number(r['round'])), 0);
-  const sumText = (rows: Row[], column: string): string =>
-    rows.reduce((t, r) => t + BigInt(String(r[column])), 0n).toString();
-
-  return {
-    contract_id: contractId,
-    member_count: String(members.length),
-    current_round: Math.max(maxRound(contributions), maxRound(payouts)),
-    completed_rounds: maxRound(payouts),
-    contributed_total: sumText(contributions, 'amount'),
-    paid_out_total: sumText(payouts, 'recipient_amount'),
-    fee_total: sumText(fees, 'fee'),
-    started: events.some((r) => r['name'] === 'start'),
-    completed: events.some((r) => r['name'] === 'completed'),
-    last_event_ledger: String(events.reduce((m, r) => Math.max(m, Number(r['ledger'])), 0)),
-  };
-}
-
-type Filter = { column: string; op: 'eq' | 'in'; value: unknown };
+type Filter = { column: string; op: 'eq' | 'in' | 'lt'; value: unknown };
 
 class StubBuilder {
   #client: StubSupabaseClient;
@@ -152,6 +97,7 @@ class StubBuilder {
   #upsertIgnoreDuplicates = false;
   #insertRow: Row | null = null;
   #updateValues: Row | null = null;
+  #range: { from: number; to: number } | null = null;
 
   constructor(client: StubSupabaseClient, table: string) {
     this.#client = client;
@@ -159,7 +105,23 @@ class StubBuilder {
   }
 
   select(_columns: string): this {
-    this.#mode = 'select';
+    if (this.#mode !== 'update') {
+      this.#mode = 'select';
+    }
+    return this;
+  }
+
+  order(_col: string, _opts?: { ascending: boolean }): this {
+    return this;
+  }
+
+  range(from: number, to: number): this {
+    this.#range = { from, to };
+    return this;
+  }
+
+  lt(column: string, value: unknown): this {
+    this.#filters.push({ column, op: 'lt', value });
     return this;
   }
 
@@ -218,6 +180,10 @@ class StubBuilder {
     return this.#filters.every((filter) => {
       const value = row[filter.column];
       if (filter.op === 'eq') return value === filter.value;
+      if (filter.op === 'lt') {
+        return typeof value === 'number' && typeof filter.value === 'number' &&
+          value < filter.value;
+      }
       return (filter.value as unknown[]).includes(value);
     });
   }
@@ -241,7 +207,10 @@ class StubBuilder {
     this.#client.calls.push({ table: this.#table, op: mode });
     switch (mode) {
       case 'select': {
-        const rows = this.#client.rows(this.#table).filter((row) => this.#matches(row));
+        let rows = this.#client.rows(this.#table).filter((row) => this.#matches(row));
+        if (this.#range !== null) {
+          rows = rows.slice(this.#range.from, this.#range.to + 1);
+        }
         if (this.#maybeSingle) return Promise.resolve({ data: rows[0] ?? null, error: null });
         return Promise.resolve({ data: rows, error: null });
       }
@@ -267,7 +236,7 @@ class StubBuilder {
       case 'update': {
         const matched = this.#client.rows(this.#table).filter((row) => this.#matches(row));
         for (const row of matched) Object.assign(row, this.#updateValues);
-        return Promise.resolve({ error: null, count: matched.length });
+        return Promise.resolve({ error: null, count: matched.length, data: matched });
       }
     }
   }
@@ -420,6 +389,107 @@ Deno.test('handleRequest runs the full two-pass flow and advances the checkpoint
   }
 });
 
+Deno.test('a rejected event is persisted with its coordinates before the checkpoint advances', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const base = factoryEvent(5);
+    if (!base) throw new Error('fixture is empty');
+    // A real Factory event with its body replaced by a symbol: it decodes to a
+    // non-map and is rejected, but keeps a distinct identity from its source.
+    const rejectedEvent: RpcEvent = {
+      ...base,
+      eventIndex: base.eventIndex + 1000,
+      id: `${base.ledger}-${base.eventIndex + 1000}`,
+      value: base.topic[0] as string,
+    };
+
+    const { stub, db, rpc } = makeDeps(
+      [rejectedEvent, factoryEvent(5), ...groupEvents],
+      SCENARIO_HEAD,
+    );
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.eventsRejected, 1);
+    assertEquals(body.eventsDecoded, groupEvents.length + 1);
+
+    // The acceptance criterion: a rejection is a durable record, not a log line.
+    const rows = stub.rows('indexer_rejected_events');
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0]?.['event_id'], rejectedEvent.id);
+    assertEquals(rows[0]?.['contract_id'], rejectedEvent.contractId);
+    assertEquals(rows[0]?.['ledger'], rejectedEvent.ledger);
+    assertEquals(rows[0]?.['event_index'], rejectedEvent.eventIndex);
+    assert(
+      (rows[0]?.['reason'] as string).includes('not a map'),
+      'the rejection reason must be recorded',
+    );
+
+    // Persisting the rejection is part of the write set, so the checkpoint
+    // still advances once everything is on record.
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a run whose only event is rejected still records it', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const base = factoryEvent(5);
+    if (!base) throw new Error('fixture is empty');
+    const rejectedEvent: RpcEvent = {
+      ...base,
+      eventIndex: base.eventIndex + 1000,
+      id: `${base.ledger}-${base.eventIndex + 1000}`,
+      value: base.topic[0] as string,
+    };
+
+    const { stub, db, rpc } = makeDeps([rejectedEvent], SCENARIO_HEAD);
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.eventsRejected, 1);
+    assertEquals(body.eventsDecoded, 0);
+    assertEquals(stub.rows('indexer_rejected_events').length, 1);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('IndexerDb.recordRejectedEvents throws so a rejection cannot be silently lost', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  stub.errorOn = { table: 'indexer_rejected_events', op: 'upsert' };
+
+  await assertRejects(
+    () =>
+      db.recordRejectedEvents('corr', [{
+        event_id: 'ledger-token-7',
+        ledger: 10,
+        tx_hash: 'a'.repeat(64),
+        tx_index: 0,
+        event_index: 7,
+        contract_id: FACTORY_ID,
+        reason: 'unknown event name',
+      }]),
+    Error,
+    'rejected events',
+  );
+});
+
+Deno.test('IndexerDb.recordRejectedEvents is a no-op for an empty batch', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  await db.recordRejectedEvents('corr', []);
+  assertEquals(stub.rows('indexer_rejected_events').length, 0);
+  assertEquals(stub.callsTo('indexer_rejected_events', 'upsert'), []);
+});
+
 Deno.test('a failed run records the failure and never advances the checkpoint', async () => {
   const restoreEnv = withTestEnv();
   try {
@@ -440,6 +510,32 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
     assertEquals(runs.length, 1);
     assertEquals(runs[0]?.['status'], 'failed');
     assert((runs[0]?.['reason'] as string).length > 0, 'a reason must be recorded');
+
+    // The failed run records the range it was actually working on, so an
+    // operator reading indexer_runs knows which ledgers to retry.
+    assertEquals(runs[0]?.['ledger_from'], SCENARIO_FROM);
+    assertEquals(runs[0]?.['ledger_to'], SCENARIO_HEAD);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a failure before the range is computed records an unknown range of 0/0', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db } = makeDeps([], SCENARIO_HEAD);
+    // The checkpoint read fails, so no range has been computed yet.
+    stub.failOn = { table: 'indexer_checkpoints', op: 'select' };
+
+    const response = await handleRequest(authorizedRequest(), { db });
+    assertEquals(response.status, 500);
+    const body = await response.json();
+    assertEquals(body.status, 'failed');
+
+    const runs = stub.rows('indexer_runs');
+    assertEquals(runs.length, 1);
+    assertEquals(runs[0]?.['ledger_from'], 0);
+    assertEquals(runs[0]?.['ledger_to'], 0);
   } finally {
     restoreEnv();
   }
@@ -516,7 +612,7 @@ Deno.test('IndexerDb.upsertGroupState throws when the group has no row', async (
   );
 });
 
-Deno.test('IndexerDb.recordRunFailure never throws', async () => {
+Deno.test('IndexerDb.recordRunFailure never throws on error response', async () => {
   const { stub, db } = makeDeps([], SCENARIO_HEAD);
   stub.errorOn = { table: 'indexer_runs', op: 'insert' };
 
@@ -526,4 +622,36 @@ Deno.test('IndexerDb.recordRunFailure never throws', async () => {
     ledgerTo: 2,
     reason: 'boom',
   });
+});
+
+Deno.test('IndexerDb.recordRunFailure never rejects when insert rejects', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  stub.failOn = { table: 'indexer_runs', op: 'insert' };
+
+  await db.recordRunFailure({
+    correlationId: 'test',
+    ledgerFrom: 1,
+    ledgerTo: 2,
+    reason: 'network down',
+  });
+});
+
+Deno.test('handleRequest returns structured 500 even when recordRunFailure insert rejects', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db } = makeDeps([], SCENARIO_HEAD);
+    const rpc: RpcSource = {
+      getLatestLedger: () => Promise.resolve(SCENARIO_HEAD),
+      getEvents: () => Promise.reject(new Error('RPC endpoint unavailable')),
+    };
+    stub.failOn = { table: 'indexer_runs', op: 'insert' };
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 500);
+    const body = await response.json();
+    assertEquals(body.status, 'failed');
+    assertEquals(body.reason, 'RPC endpoint unavailable');
+  } finally {
+    restoreEnv();
+  }
 });
