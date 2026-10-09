@@ -29,6 +29,7 @@ import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
 import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
+import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { fetchRangeEvents } from '../_shared/scan.ts';
 import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
@@ -271,7 +272,13 @@ export async function handleRequest(request: Request): Promise<Response> {
       200,
     );
   } catch (error) {
-    const reason = error instanceof Error ? error.message : 'unknown indexing failure';
+    // The reason travels to three places an operator (or a caller) can see:
+    // the log line, the runs table and the HTTP response. A fetch failure
+    // message can carry the full RPC URL including an embedded API key, so it
+    // is sanitized once here rather than at each sink.
+    const reason = sanitizeErrorMessage(
+      error instanceof Error ? error.message : 'unknown indexing failure',
+    );
     logger.error('Indexing run failed', { reason });
 
     // Record the failure for operators. The checkpoint is deliberately left
