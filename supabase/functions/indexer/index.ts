@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  classifyNullRange,
+  computeLedgerRange,
+  ledgerLag,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -55,7 +60,7 @@ type RequestDependencies = {
 };
 
 type RunSummary = {
-  status: 'ok' | 'skipped' | 'failed';
+  status: 'ok' | 'skipped' | 'tip_regression' | 'failed';
   correlationId: string;
   ledgerFrom?: number;
   ledgerTo?: number;
@@ -169,6 +174,33 @@ export async function handleRequest(
     });
 
     if (range === null) {
+      const nullRange = classifyNullRange({
+        lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
+        latestLedger,
+        startLedger: checkpoint?.startLedger ?? config.startLedger,
+      });
+      if (nullRange === 'tip_regression') {
+        const lastProcessedLedger = checkpoint?.lastProcessedLedger ?? null;
+        const startLedger = checkpoint?.startLedger ?? config.startLedger;
+        const reason = lastProcessedLedger === null
+          ? `chain tip ${latestLedger} is behind the deployment start ledger ${startLedger}`
+          : `chain tip ${latestLedger} is behind the checkpoint ${lastProcessedLedger}`;
+        logger.warn('Chain tip regressed', {
+          latestLedger,
+          lastProcessedLedger,
+          startLedger,
+        });
+        return jsonResponse(
+          {
+            status: 'tip_regression',
+            correlationId,
+            checkpoint: checkpoint?.lastProcessedLedger,
+            lag: ledgerLag(checkpoint, latestLedger),
+            reason,
+          },
+          200,
+        );
+      }
       logger.info('Nothing to index', { latestLedger });
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the
