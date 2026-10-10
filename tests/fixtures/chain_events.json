@@ -1,5 +1,5 @@
 {
-  "note": "Raw Soroban events captured from Stellar Testnet. Used as decode fixtures so the decoder is tested against the bytes the network actually emits, not against bytes we assumed it emits.",
+  "note": "Seven original fixtures are inherited from upstream. The three config-event samples are synthetic decoder inputs, NOT verified Testnet captures; see provenance on each sample. Real capture provenance is still required for issue #48.",
   "factory_contract_id": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
   "group_contract_id": "CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O",
   "factory_events": [
@@ -119,13 +119,14 @@
       "id": "0019881644131377152-0000000000",
       "operationIndex": 0,
       "transactionIndex": 2,
-      "txHash": "e2d3f4a5b6c7d8e9f0123456789abcdef0123456789abcdef0123456789abcdef",
+      "txHash": "1111111111111111111111111111111111111111111111111111111111111111",
       "inSuccessfulContractCall": true,
       "topic": [
         "AAAADwAAAARzdXN1",
         "AAAADwAAAAtmZWVfdXBkYXRlZAA="
       ],
-      "value": "AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAAMAAAAP"
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAAMAAAAP",
+      "provenance": "synthetic; not an on-chain transaction; real Testnet capture pending"
     },
     {
       "type": "contract",
@@ -135,14 +136,15 @@
       "id": "0019881648426344448-0000000000",
       "operationIndex": 0,
       "transactionIndex": 3,
-      "txHash": "f3e4d5c6b7a890123456789abcdef0123456789abcdef0123456789abcdef012",
+      "txHash": "2222222222222222222222222222222222222222222222222222222222222222",
       "inSuccessfulContractCall": true,
       "topic": [
         "AAAADwAAAARzdXN1",
         "AAAADwAAABB0cmVhc3VyeV91cGRhdGVk",
         "AAAAEgAAAAAAAAAAlUFpUf3CXYyhKvn9OZqu9uuXyPtXvNrSoqO2/BYIsFg="
       ],
-      "value": "AAAAEQAAAAEAAAAA"
+      "value": "AAAAEQAAAAEAAAAA",
+      "provenance": "synthetic; not an on-chain transaction; real Testnet capture pending"
     },
     {
       "type": "contract",
@@ -152,13 +154,14 @@
       "id": "0019881652721311744-0000000000",
       "operationIndex": 0,
       "transactionIndex": 4,
-      "txHash": "0415263748596a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3",
+      "txHash": "3333333333333333333333333333333333333333333333333333333333333333",
       "inSuccessfulContractCall": true,
       "topic": [
         "AAAADwAAAARzdXN1",
         "AAAADwAAAA1wYXVzZV91cGRhdGVkAAAA"
       ],
-      "value": "AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAB"
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAB",
+      "provenance": "synthetic; not an on-chain transaction; real Testnet capture pending"
     }
   ],
   "group_events": [
