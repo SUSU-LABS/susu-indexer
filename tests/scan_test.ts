@@ -299,3 +299,23 @@ Deno.test('reads every chunk in full, not just the first', async () => {
   assertEquals(events.length, PAGE_LIMIT + 3 + PAGE_LIMIT + 4);
   assertEquals(source.requests.length, 4);
 });
+
+Deno.test('fetchRangeEvents does not retry deterministic RpcError -32600', async () => {
+  let attempts = 0;
+  const source: EventSource = {
+    getEvents: () => {
+      attempts++;
+      return Promise.reject(
+        new Error('RPC error -32600: startLedger must be within the ledger range'),
+      );
+    },
+  };
+
+  await assertRejects(
+    () => fetchRangeEvents(source, [CONTRACT], 1, 10),
+    Error,
+    '-32600',
+  );
+
+  assertEquals(attempts, 1);
+});

@@ -89,7 +89,9 @@ export class IndexerDb {
       .maybeSingle();
 
     if (error) {
-      throw new Error(`Failed to read indexer checkpoint: ${error.message}`);
+      throw Object.assign(new Error(`Failed to read indexer checkpoint: ${error.message}`), {
+        code: error.code,
+      });
     }
     if (!data) return undefined;
 
@@ -114,7 +116,9 @@ export class IndexerDb {
       .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
 
     if (error) {
-      throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      throw Object.assign(new Error(`Failed to upsert indexed events: ${error.message}`), {
+        code: error.code,
+      });
     }
   }
 
@@ -146,7 +150,9 @@ export class IndexerDb {
       );
 
     if (error) {
-      throw new Error(`Failed to persist rejected events: ${error.message}`);
+      throw Object.assign(new Error(`Failed to persist rejected events: ${error.message}`), {
+        code: error.code,
+      });
     }
   }
 
@@ -175,7 +181,9 @@ export class IndexerDb {
       const { data, error } = await orderedQuery.range(from, to);
 
       if (error) {
-        throw new Error(`Failed to read indexed group contracts: ${error.message}`);
+        throw Object.assign(new Error(`Failed to read indexed group contracts: ${error.message}`), {
+          code: error.code,
+        });
       }
 
       if (!data || data.length === 0) {
@@ -211,7 +219,9 @@ export class IndexerDb {
       .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
 
     if (error) {
-      throw new Error(`Failed to upsert groups: ${error.message}`);
+      throw Object.assign(new Error(`Failed to upsert groups: ${error.message}`), {
+        code: error.code,
+      });
     }
   }
 
@@ -246,7 +256,9 @@ export class IndexerDb {
       .upsert([...rows], { onConflict, ignoreDuplicates: true });
 
     if (error) {
-      throw new Error(`Failed to record ${table}: ${error.message}`);
+      throw Object.assign(new Error(`Failed to record ${table}: ${error.message}`), {
+        code: error.code,
+      });
     }
   }
 
@@ -364,7 +376,9 @@ export class IndexerDb {
     });
 
     if (error) {
-      throw new Error(`Failed to derive group state: ${error.message}`);
+      throw Object.assign(new Error(`Failed to derive group state: ${error.message}`), {
+        code: error.code,
+      });
     }
 
     return ((data ?? []) as Record<string, unknown>[]).map((row) => ({
@@ -448,7 +462,9 @@ export class IndexerDb {
         .eq('contract_id', contractId);
 
       if (error) {
-        throw new Error(`Failed to record group state: ${error.message}`);
+        throw Object.assign(new Error(`Failed to record group state: ${error.message}`), {
+          code: error.code,
+        });
       }
 
       // Zero rows means reconciliation was asked about a group that has no row,
@@ -498,7 +514,9 @@ export class IndexerDb {
         const { data, error } = await pagedQuery;
 
         if (error) {
-          throw new Error(`Failed to read ${table}: ${error.message}`);
+          throw Object.assign(new Error(`Failed to read ${table}: ${error.message}`), {
+            code: error.code,
+          });
         }
 
         const rows = (data ?? []) as unknown as Record<string, unknown>[];
@@ -557,7 +575,9 @@ export class IndexerDb {
       .select('id');
 
     if (error) {
-      throw new Error(`Failed to advance indexer checkpoint: ${error.message}`);
+      throw Object.assign(new Error(`Failed to advance indexer checkpoint: ${error.message}`), {
+        code: error.code,
+      });
     }
 
     if (data && data.length > 0) {
@@ -583,7 +603,10 @@ export class IndexerDb {
       );
 
     if (insertError) {
-      throw new Error(`Failed to advance indexer checkpoint: ${insertError.message}`);
+      throw Object.assign(
+        new Error(`Failed to advance indexer checkpoint: ${insertError.message}`),
+        { code: insertError.code },
+      );
     }
 
     // In case a concurrent initial run inserted a lower ledger between our update
@@ -599,7 +622,10 @@ export class IndexerDb {
       .lt('last_processed_ledger', params.lastProcessedLedger);
 
     if (recheckError) {
-      throw new Error(`Failed to advance indexer checkpoint: ${recheckError.message}`);
+      throw Object.assign(
+        new Error(`Failed to advance indexer checkpoint: ${recheckError.message}`),
+        { code: recheckError.code },
+      );
     }
   }
 
@@ -626,7 +652,9 @@ export class IndexerDb {
       .eq('id', 'default');
 
     if (error) {
-      throw new Error(`Failed to record latest ledger: ${error.message}`);
+      throw Object.assign(new Error(`Failed to record latest ledger: ${error.message}`), {
+        code: error.code,
+      });
     }
   }
 

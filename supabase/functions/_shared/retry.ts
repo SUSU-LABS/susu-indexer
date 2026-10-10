@@ -60,3 +60,29 @@ export async function withRetry<T>(
   // Unreachable: the loop either returns or throws.
   throw lastError;
 }
+
+/** Retry transport/availability failures, never unknown application failures. */
+export function isRetryableError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const value = error as { name?: unknown; message?: unknown; status?: unknown; code?: unknown };
+  const code = typeof value.code === 'string' ? value.code : '';
+  // PostgreSQL integrity and input errors are deterministic, even if their
+  // messages happen to contain words such as "timeout".
+  if (/^(22|23)/.test(code)) return false;
+  if (/^08/.test(code) || ['40001', '40P01', '53300', '57P01', '57P02', '57P03'].includes(code)) {
+    return true;
+  }
+  if (typeof value.status === 'number') {
+    return value.status === 408 || value.status === 429 ||
+      (value.status >= 500 && value.status < 600);
+  }
+  if (value.name === 'TimeoutError') return true;
+  const message = typeof value.message === 'string' ? value.message : '';
+  const rpcCode = /RPC error (-?\d+)/.exec(message)?.[1];
+  if (rpcCode !== undefined) {
+    const code = Number(rpcCode);
+    return code <= -32000 && code >= -32099;
+  }
+  return /connection (refused|reset|terminated|closed)|econnreset|etimedout|econnrefused|socket hang up|network connection was lost|too many clients|terminating connection due to|could not connect|fetch failed|failed to fetch|error sending request|dns error|timed out|timeout expired|serialization failure|deadlock detected/i
+    .test(message);
+}
