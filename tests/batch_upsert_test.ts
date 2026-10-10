@@ -126,7 +126,7 @@ Deno.test('a failed middle batch fails the run', async () => {
   const { client, calls } = stubClient({ failOnCall: 1 });
   const db = new IndexerDb('https://x.test', 'key', client);
 
-  const total = UPSERT_BATCH_SIZE * 2;
+  const total = UPSERT_BATCH_SIZE * 3;
   const err = await assertRejects(() =>
     db.upsertEvents(Array.from({ length: total }, (_, i) => eventRow(i)))
   );
