@@ -1,177 +1,117 @@
-/**
- * Webhook delivery at-least-once reconciliation tests (PGlite).
- */
 import { PGlite } from 'npm:@electric-sql/pglite@0.3.4';
 import { assertEquals, assertNotEquals } from '@std/assert';
 
-const MIGRATIONS = [
-  'supabase/migrations/20260808000000_indexer_core.sql',
-  'supabase/migrations/20260816000000_chain_derived.sql',
-  'supabase/migrations/20260914000000_indexer_alerts.sql',
-  'supabase/migrations/20261009000001_ledger_lag_alert.sql',
-  'supabase/migrations/20261010000000_confirm_webhook_delivery.sql',
+const migrations = [
+  '20260808000000_indexer_core.sql',
+  '20260816000000_chain_derived.sql',
+  '20260914000000_indexer_alerts.sql',
+  '20261009000001_ledger_lag_alert.sql',
+  '20261010000000_confirm_webhook_delivery.sql',
 ];
 
-async function setupDbWithMockNet(
-  mockStatusCode: number,
-  mockError: string | null = null,
-): Promise<PGlite> {
+async function freshDb(): Promise<PGlite> {
   const db = new PGlite();
-
-  // Create mock vault and net schemas
   await db.exec(`
-    create schema if not exists vault;
-    create table if not exists vault.decrypted_secrets (
-      name text primary key,
-      decrypted_secret text not null
-    );
-    insert into vault.decrypted_secrets (name, decrypted_secret)
-    values ('indexer_alert_webhook', 'https://webhook.example.com/alerts');
-
-    create schema if not exists net;
-    create sequence if not exists net.request_id_seq;
-    create table if not exists net._http_response (
-      id bigint primary key,
-      status_code integer,
-      content text,
-      error_msg text
-    );
+    create schema vault;
+    create table vault.decrypted_secrets (name text primary key, decrypted_secret text);
+    insert into vault.decrypted_secrets values ('indexer_alert_webhook', 'https://example.test/alerts');
+    create schema net;
+    create table net.requests (id bigserial primary key, body jsonb);
+    create table net._http_response (id bigint primary key, status_code integer, error_msg text, timed_out boolean);
+    create function net.http_post(url text, headers jsonb, body jsonb, timeout_milliseconds integer)
+    returns bigint language sql as $$
+      insert into net.requests(body) values ($3) returning id;
+    $$;
   `);
-
-  // Define mock net.http_post
-  const errorLiteral = mockError ? `'${mockError}'` : 'null';
-  await db.exec(`
-    create or replace function net.http_post(
-      url text,
-      headers jsonb,
-      body jsonb,
-      timeout_milliseconds integer
-    )
-    returns bigint as $$
-    declare
-      v_id bigint := nextval('net.request_id_seq');
-    begin
-      insert into net._http_response (id, status_code, content, error_msg)
-      values (v_id, ${mockStatusCode}, '{"ok": true}', ${errorLiteral});
-      return v_id;
-    end;
-    $$ language plpgsql;
-  `);
-
-  // Apply migrations
-  for (const m of MIGRATIONS) {
-    const sql = await Deno.readTextFile(m);
-    await db.exec(sql);
+  for (const name of migrations) {
+    await db.exec(await Deno.readTextFile(`supabase/migrations/${name}`));
   }
-
   return db;
 }
 
-Deno.test('successful delivery (2xx) sets notified_at once', async () => {
-  const db = await setupDbWithMockNet(200);
-
-  // Run check with 0s threshold to trigger stale_checkpoint alert
-  const res1 = await db.query<{ notified: number }>(
-    "select notified from public.check_indexer_health('0 seconds', '1 hour', true);",
+async function check(db: PGlite) {
+  const result = await db.query<{ notified: number }>(
+    "select notified from public.check_indexer_health('0 seconds', '1 hour', true)",
   );
-  assertEquals(res1.rows[0]?.notified, 1);
-
-  const alertRow = await db.query<{ notified_at: string | null }>(
-    "select notified_at from public.indexer_alerts where kind = 'stale_checkpoint';",
+  return result.rows[0]?.notified;
+}
+async function alert(db: PGlite) {
+  const result = await db.query<{ notified_at: string | null; notification_request_id: number }>(
+    "select notified_at, notification_request_id from public.indexer_alerts where kind='stale_checkpoint'",
   );
-  assertNotEquals(alertRow.rows[0]?.notified_at, null);
+  return result.rows[0]!;
+}
+async function respond(
+  db: PGlite,
+  status: number | null,
+  error: string | null = null,
+  timeout = false,
+) {
+  await db.query('insert into net._http_response values ($1, $2, $3, $4)', [
+    (await alert(db)).notification_request_id,
+    status,
+    error,
+    timeout,
+  ]);
+}
 
-  // Subsequent check does not notify again
-  const res2 = await db.query<{ notified: number }>(
-    "select notified from public.check_indexer_health('0 seconds', '1 hour', true);",
-  );
-  assertEquals(res2.rows[0]?.notified, 0);
+Deno.test('queueing is not delivery; a later 2xx confirms exactly once', async () => {
+  const db = await freshDb();
+  try {
+    assertEquals(await check(db), 0);
+    const queued = await alert(db);
+    assertEquals(queued.notified_at, null);
+    assertEquals(await check(db), 0);
+    assertEquals((await alert(db)).notification_request_id, queued.notification_request_id);
+    await respond(db, 204);
+    assertEquals(await check(db), 1);
+    const delivered = await alert(db);
+    assertNotEquals(delivered.notified_at, null);
+    assertEquals(await check(db), 0);
+    assertEquals((await alert(db)).notified_at, delivered.notified_at);
+  } finally {
+    await db.close();
+  }
 });
 
-Deno.test('failed delivery (500) leaves notified_at null and is retried on subsequent pass', async () => {
-  const db = await setupDbWithMockNet(500);
+for (
+  const [label, status, error, timeout] of [
+    ['server error', 500, null, false],
+    ['transport error', null, 'connection refused', false],
+    ['timeout without status', null, null, true],
+    ['2xx with transport error', 200, 'incomplete response', false],
+  ] as const
+) {
+  Deno.test(`${label}: retry without claiming delivery, then confirm recovery`, async () => {
+    const db = await freshDb();
+    try {
+      await check(db);
+      const first = await alert(db);
+      await respond(db, status, error, timeout);
+      assertEquals(await check(db), 0);
+      const retried = await alert(db);
+      assertEquals(retried.notified_at, null);
+      assertNotEquals(retried.notification_request_id, first.notification_request_id);
+      await respond(db, 200);
+      assertEquals(await check(db), 1);
+    } finally {
+      await db.close();
+    }
+  });
+}
 
-  // Run check with 500 error response
-  const res1 = await db.query<{ notified: number }>(
-    "select notified from public.check_indexer_health('0 seconds', '1 hour', true);",
-  );
-  assertEquals(res1.rows[0]?.notified, 0);
-
-  const alertRow1 = await db.query<{ notified_at: string | null }>(
-    "select notified_at from public.indexer_alerts where kind = 'stale_checkpoint';",
-  );
-  assertEquals(alertRow1.rows[0]?.notified_at, null);
-
-  // Now simulate webhook recovery (200 OK)
-  await db.exec(`
-    create or replace function net.http_post(
-      url text,
-      headers jsonb,
-      body jsonb,
-      timeout_milliseconds integer
-    )
-    returns bigint as $$
-    declare
-      v_id bigint := nextval('net.request_id_seq');
-    begin
-      insert into net._http_response (id, status_code, content, error_msg)
-      values (v_id, 200, '{"ok": true}', null);
-      return v_id;
-    end;
-    $$ language plpgsql;
-  `);
-
-  // Next run retries and succeeds
-  const res2 = await db.query<{ notified: number }>(
-    "select notified from public.check_indexer_health('0 seconds', '1 hour', true);",
-  );
-  assertEquals(res2.rows[0]?.notified, 1);
-
-  const alertRow2 = await db.query<{ notified_at: string | null }>(
-    "select notified_at from public.indexer_alerts where kind = 'stale_checkpoint';",
-  );
-  assertNotEquals(alertRow2.rows[0]?.notified_at, null);
-});
-
-Deno.test('transport error leaves notified_at null and is retried on recovery', async () => {
-  const db = await setupDbWithMockNet(0, 'connection refused');
-
-  const res1 = await db.query<{ notified: number }>(
-    "select notified from public.check_indexer_health('0 seconds', '1 hour', true);",
-  );
-  assertEquals(res1.rows[0]?.notified, 0);
-
-  const alertRow1 = await db.query<{ notified_at: string | null }>(
-    "select notified_at from public.indexer_alerts where kind = 'stale_checkpoint';",
-  );
-  assertEquals(alertRow1.rows[0]?.notified_at, null);
-
-  // Recovery
-  await db.exec(`
-    create or replace function net.http_post(
-      url text,
-      headers jsonb,
-      body jsonb,
-      timeout_milliseconds integer
-    )
-    returns bigint as $$
-    declare
-      v_id bigint := nextval('net.request_id_seq');
-    begin
-      insert into net._http_response (id, status_code, content, error_msg)
-      values (v_id, 200, '{"ok": true}', null);
-      return v_id;
-    end;
-    $$ language plpgsql;
-  `);
-
-  const res2 = await db.query<{ notified: number }>(
-    "select notified from public.check_indexer_health('0 seconds', '1 hour', true);",
-  );
-  assertEquals(res2.rows[0]?.notified, 1);
-
-  const alertRow2 = await db.query<{ notified_at: string | null }>(
-    "select notified_at from public.indexer_alerts where kind = 'stale_checkpoint';",
-  );
-  assertNotEquals(alertRow2.rows[0]?.notified_at, null);
+Deno.test('a lost response is retried after the pending deadline', async () => {
+  const db = await freshDb();
+  try {
+    await check(db);
+    const first = await alert(db);
+    await db.exec(
+      "update public.indexer_alerts set notification_requested_at=now()-interval '6 minutes'",
+    );
+    assertEquals(await check(db), 0);
+    assertNotEquals((await alert(db)).notification_request_id, first.notification_request_id);
+    assertEquals((await alert(db)).notified_at, null);
+  } finally {
+    await db.close();
+  }
 });

@@ -17,7 +17,8 @@
 -- 1. Add notification_request_id column to indexer_alerts.
 -- ---------------------------------------------------------------------------
 alter table public.indexer_alerts
-  add column if not exists notification_request_id bigint;
+  add column if not exists notification_request_id bigint,
+  add column if not exists notification_requested_at timestamptz;
 
 comment on column public.indexer_alerts.notification_request_id is
   'pg_net request id for in-flight or last attempted webhook delivery. Reconciled against net._http_response before marking notified_at.';
@@ -50,6 +51,7 @@ declare
   v_req_id bigint;
   v_status integer;
   v_error text;
+  v_timed_out boolean;
 begin
   -- The conditions that are true right now. A temp table rather than four
   -- repeated queries, because the same set is used to open alerts and then to
@@ -117,7 +119,7 @@ begin
       )
     from cron.job_run_details d
     join cron.job j on j.jobid = d.jobid
-    where d.status <> 'succeeded'
+    where d.status = 'failed'
       and d.start_time > v_now - failure_window
     group by j.jobname
     having count(*) > 0;
@@ -176,23 +178,29 @@ begin
       -- Step A: Reconcile in-flight webhook responses
       if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'net' and c.relname = '_http_response') then
         for v_alert in
-          select a.id, a.notification_request_id
+          select a.id, a.notification_request_id, a.notification_requested_at
           from public.indexer_alerts a
           where a.notified_at is null
             and a.notification_request_id is not null
+          order by a.id
+          limit 100
+          for update skip locked
         loop
-          execute 'select status_code, error_msg from net._http_response where id = $1'
-            into v_status, v_error
+          execute 'select status_code, error_msg, timed_out from net._http_response where id = $1'
+            into v_status, v_error, v_timed_out
             using v_alert.notification_request_id;
 
-          if v_status is not null or v_error is not null then
-            if v_status >= 200 and v_status < 300 then
-              update public.indexer_alerts set notified_at = v_now where id = v_alert.id;
-              v_notified := v_notified + 1;
-            else
-              -- Failed/non-2xx response: clear request_id so it will be retried
-              update public.indexer_alerts set notification_request_id = null where id = v_alert.id;
-            end if;
+          if v_status >= 200 and v_status < 300
+            and v_error is null and not coalesce(v_timed_out, false) then
+            update public.indexer_alerts set notified_at = v_now where id = v_alert.id;
+            v_notified := v_notified + 1;
+          elsif v_status is not null or v_error is not null or coalesce(v_timed_out, false)
+            or v_alert.notification_requested_at is null
+            or v_alert.notification_requested_at <= v_now - interval '5 minutes' then
+            -- Retry failed or lost/expired responses. pg_net responses are not durable.
+            update public.indexer_alerts
+            set notification_request_id = null, notification_requested_at = null
+            where id = v_alert.id;
           end if;
         end loop;
       end if;
@@ -204,7 +212,9 @@ begin
         where a.resolved_at is null
           and a.notified_at is null
           and a.notification_request_id is null
-        order by a.opened_at
+        order by a.opened_at, a.id
+        limit 100
+        for update skip locked
       loop
         execute 'select net.http_post(
           url := $1,
@@ -225,24 +235,11 @@ begin
           using v_webhook, v_alert.kind, v_alert.subject, v_now, v_alert.detail;
 
         update public.indexer_alerts
-        set notification_request_id = v_req_id
+        set notification_request_id = v_req_id, notification_requested_at = v_now
         where id = v_alert.id;
 
-        -- Check if immediate response is recorded
-        if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'net' and c.relname = '_http_response') then
-          execute 'select status_code, error_msg from net._http_response where id = $1'
-            into v_status, v_error
-            using v_req_id;
-
-          if v_status is not null or v_error is not null then
-            if v_status >= 200 and v_status < 300 then
-              update public.indexer_alerts set notified_at = v_now where id = v_alert.id;
-              v_notified := v_notified + 1;
-            else
-              update public.indexer_alerts set notification_request_id = null where id = v_alert.id;
-            end if;
-          end if;
-        end if;
+        -- pg_net starts work only after this transaction commits. A later
+        -- health check confirms the response; enqueueing never means delivery.
       end loop;
     end if;
   end if;
