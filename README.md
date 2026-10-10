@@ -216,10 +216,10 @@ silently, since the run still succeeds.
 ## Operations
 
 - **Alerts:** `check_indexer_health()` runs under its own cron job and opens one row in
-  `indexer_alerts` per condition — a stale checkpoint, a recorded failure, or a scheduled invocation
-  that did not succeed. One alert per condition rather than one per check, so it does not become
-  noise, and it resolves when the condition clears. Without a webhook stored in Vault the alerts are
-  recorded but not delivered, which means the table has to be looked at — see
+  `indexer_alerts` per condition — a stale checkpoint, a recorded failure, a rejected event, or a
+  scheduled invocation that did not succeed. One alert per condition rather than one per check, so
+  it does not become noise, and it resolves when the condition clears. Without a webhook stored in
+  Vault the alerts are recorded but not delivered, which means the table has to be looked at — see
   [`docs/RUNBOOK.md`](docs/RUNBOOK.md#alerts-and-what-they-are-for).
 - **Stale checkpoint:** check `indexer_runs` for failures, then confirm RPC reachability. Restarting
   resumes from the checkpoint automatically.
