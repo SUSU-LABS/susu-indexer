@@ -70,6 +70,15 @@ class StubSupabaseClient {
     return new StubBuilder(this, table);
   }
 
+  async rpc(fn: string, params: Record<string, unknown>): Promise<{ data: unknown; error: null }> {
+    this.calls.push({ table: `rpc:${fn}`, op: 'select' });
+    // The derive_group_state RPC aggregates facts in Postgres; the stub has no
+    // SQL engine, so return no derived rows. Tests that need derived state
+    // assert on the persisted group rows, not on the RPC itself.
+    void params;
+    return { data: [], error: null };
+  }
+
   rows(table: string): Row[] {
     let rows = this.tables.get(table);
     if (!rows) {
@@ -553,10 +562,10 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // Only the latest-ledger heartbeat write happened: no events, no other writes.
     assertEquals(
       stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      [{ table: 'indexer_checkpoints', op: 'update' }],
     );
     assertEquals(rpc.requests, []);
   } finally {
