@@ -416,7 +416,14 @@ export class IndexerDb {
   }
 
   /**
-   * Writes derived state over the stored figures.
+   * Writes derived state over the stored figures, in a single round trip.
+   *
+   * One `reconcile_group_states` RPC updates every row at once instead of
+   * one UPDATE per group. The RPC returns the contract_ids that had no
+   * `groups` row, and a non-empty result is an error: reconciliation updates
+   * groups that discovery has already recorded; it never creates them, and
+   * if asked to, something is wrong enough to say so rather than write a
+   * half-populated row.
    *
    * An UPDATE, not an upsert, and the distinction is not stylistic. Postgres
    * checks a row's `NOT NULL` constraints on the tuple an `INSERT` proposes,
@@ -429,37 +436,43 @@ export class IndexerDb {
    *
    * That failure only appears against a real Postgres; a stubbed client accepts
    * whatever it is handed.
-   *
-   * Updating is also the honest description of what reconciliation does. It
-   * corrects state on a group that discovery has already recorded; it never
-   * introduces a group, and if asked to, something is wrong enough to say so
-   * rather than create a half-populated row.
    */
   async upsertGroupState(states: readonly GroupState[]): Promise<void> {
     if (states.length === 0) return;
     const updatedAt = new Date().toISOString();
 
+    // Last write wins on duplicates, matching the old per-row loop.
+    const byContract = new Map<string, GroupState>();
     for (const state of states) {
-      const { contract_id: contractId, ...figures } = state;
+      byContract.set(state.contract_id, state);
+    }
 
-      const { error, count } = await this.#client
-        .from('groups')
-        .update({ ...figures, updated_at: updatedAt }, { count: 'exact' })
-        .eq('contract_id', contractId);
+    const { data, error } = await this.#client.rpc('reconcile_group_states', {
+      p_states: [...byContract.values()].map((state) => ({
+        ...state,
+        updated_at: updatedAt,
+      })),
+    });
 
-      if (error) {
-        throw new Error(`Failed to record group state: ${error.message}`);
-      }
+    if (error) {
+      throw new Error(`Failed to record group state: ${error.message}`);
+    }
 
-      // Zero rows means reconciliation was asked about a group that has no row,
-      // so discovery and ingest disagree. Creating one here would write a group
-      // with no identity, which is worse than failing the run.
-      if (count === 0) {
-        throw new Error(
-          `Failed to record group state: no groups row for ${contractId}. ` +
-            'Reconciliation updates existing groups; it never creates them.',
-        );
-      }
+    // A missing row means reconciliation was asked about a group that has no
+    // row, so discovery and ingest disagree. Creating one here would write a
+    // group with no identity, which is worse than failing the run.
+    //
+    // The SQL function always returns an array (never null); a null here
+    // means the transport gave us nothing usable, which is a failure too.
+    if (data === null) {
+      throw new Error('Failed to record group state: RPC returned no data.');
+    }
+    const missing = data as string[];
+    if (missing.length > 0) {
+      throw new Error(
+        `Failed to record group state: no groups row for ${missing.join(', ')}. ` +
+          'Reconciliation updates existing groups; it never creates them.',
+      );
     }
   }
 
