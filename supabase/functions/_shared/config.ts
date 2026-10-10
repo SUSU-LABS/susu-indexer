@@ -10,6 +10,8 @@
  * report which variables are wrong without echoing their values.
  */
 
+import { Networks } from '@stellar/stellar-sdk';
+
 export type IndexerConfig = {
   /** Supabase project URL. */
   supabaseUrl: string;
@@ -21,7 +23,7 @@ export type IndexerConfig = {
   rpcUrl: string;
   /** Stellar network name. Mainnet requires explicit opt-in. */
   network: 'local' | 'testnet' | 'mainnet';
-  /** Stellar network passphrase, for decoding network-scoped data. */
+  /** Stellar network passphrase, for decoding network-scoped data. Must match `network`. */
   networkPassphrase: string;
   /** Factory contract whose events seed group discovery. */
   factoryContractId: string;
@@ -40,6 +42,20 @@ export type ConfigResult =
   | { ok: false; missing: string[]; invalid: string[] };
 
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+
+/**
+ * Canonical SDF passphrases for the networks the indexer can run against,
+ * taken from the Stellar SDK's `Networks` constants so they cannot drift.
+ *
+ * `local` is intentionally absent: a local/standalone chain is a private
+ * deployment whose passphrase the operator chooses (the SDK's
+ * `Networks.STANDALONE` is only the default), so any non-empty passphrase is
+ * accepted there.
+ */
+const NETWORK_PASSPHRASES: Readonly<Partial<Record<IndexerConfig['network'], string>>> = {
+  testnet: Networks.TESTNET,
+  mainnet: Networks.PUBLIC,
+};
 
 function readString(env: Record<string, string | undefined>, key: string): string | undefined {
   const value = env[key];
@@ -122,6 +138,8 @@ export function loadConfig(
     invalid.push('STELLAR_RPC_URL (must be an https URL, or localhost for local development)');
   }
 
+  const networkPassphrase = values['STELLAR_NETWORK_PASSPHRASE'] as string;
+
   const allowMainnet = readString(env, 'ALLOW_MAINNET') === 'true';
   const network = (readString(env, 'STELLAR_NETWORK') ?? 'testnet') as IndexerConfig['network'];
   if (!['local', 'testnet', 'mainnet'].includes(network)) {
@@ -129,6 +147,10 @@ export function loadConfig(
   }
   if (network === 'mainnet' && !allowMainnet) {
     invalid.push('STELLAR_NETWORK=mainnet requires ALLOW_MAINNET=true (explicit approval)');
+  }
+  const expectedPassphrase = NETWORK_PASSPHRASES[network];
+  if (expectedPassphrase !== undefined && networkPassphrase !== expectedPassphrase) {
+    invalid.push(`STELLAR_NETWORK_PASSPHRASE (does not match STELLAR_NETWORK=${network})`);
   }
 
   const maxLedgers = readPositiveInt(env, 'INDEXER_MAX_LEDGER_RANGE', 1000);
@@ -153,7 +175,7 @@ export function loadConfig(
       taskSecret,
       rpcUrl,
       network,
-      networkPassphrase: values['STELLAR_NETWORK_PASSPHRASE'] as string,
+      networkPassphrase,
       factoryContractId,
       usdcContractId,
       startLedger: startLedger.value,
