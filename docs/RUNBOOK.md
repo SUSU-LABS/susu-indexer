@@ -72,9 +72,12 @@ select vault.create_secret('<webhook-url>', 'indexer_alert_webhook',
                            'Where indexer health alerts are posted');
 ```
 
-A newly opened alert is then posted there once, and its `notified_at` is set. If no webhook is
-stored, **alerts are still recorded and nothing is sent** — an open alert with a null `notified_at`
-is one nobody was told about. That is the difference between having alerting and having a table.
+A newly opened alert is posted there, and its `notified_at` is set only upon a confirmed 2xx HTTP
+response from the webhook. Notification delivery operates under **at-least-once semantics**: if the
+webhook fails, times out, or returns a non-2xx status, `notified_at` remains null and subsequent
+health checks retry delivery. If no webhook is stored, **alerts are still recorded and nothing is
+sent** — an open alert with a null `notified_at` is one nobody was told about. That is the
+difference between having alerting and having a table.
 
 ### Running the check by hand
 
