@@ -89,8 +89,14 @@ Deno.test('refuses mainnet without explicit opt-in', () => {
   }
 });
 
+const MAINNET_PASSPHRASE = 'Public Global Stellar Network ; September 2015';
+
 Deno.test('allows mainnet with explicit opt-in', () => {
-  const result = loadConfig(validEnv({ STELLAR_NETWORK: 'mainnet', ALLOW_MAINNET: 'true' }));
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK: 'mainnet',
+    ALLOW_MAINNET: 'true',
+    STELLAR_NETWORK_PASSPHRASE: MAINNET_PASSPHRASE,
+  }));
   assertEquals(result.ok, true);
   if (result.ok) assertEquals(result.config.allowMainnet, true);
 });
@@ -129,5 +135,55 @@ Deno.test('does not echo secret values in the result', () => {
   if (!result.ok) {
     assertEquals(JSON.stringify(result.invalid).includes(secret), false);
     assertEquals(JSON.stringify(result.missing).includes(secret), false);
+  }
+});
+
+Deno.test('rejects a passphrase that does not match the named network', () => {
+  const testnetOnMainnet = loadConfig(validEnv({
+    STELLAR_NETWORK: 'mainnet',
+    ALLOW_MAINNET: 'true',
+    STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
+  }));
+  assertEquals(testnetOnMainnet.ok, false);
+  if (!testnetOnMainnet.ok) {
+    assertEquals(
+      testnetOnMainnet.invalid.some((item) => item.startsWith('STELLAR_NETWORK_PASSPHRASE')),
+      true,
+    );
+  }
+
+  const mainnetOnTestnet = loadConfig(validEnv({
+    STELLAR_NETWORK_PASSPHRASE: MAINNET_PASSPHRASE,
+  }));
+  assertEquals(mainnetOnTestnet.ok, false);
+  if (!mainnetOnTestnet.ok) {
+    assertEquals(
+      mainnetOnTestnet.invalid.some((item) => item.startsWith('STELLAR_NETWORK_PASSPHRASE')),
+      true,
+    );
+  }
+});
+
+Deno.test('accepts any non-empty passphrase for a local network', () => {
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK: 'local',
+    STELLAR_NETWORK_PASSPHRASE: 'My Local Cluster ; October 2026',
+  }));
+  assertEquals(result.ok, true);
+});
+
+Deno.test('rejects the literal-quote artefact the deploy script used to store', () => {
+  // deploy-indexer.sh wrote STELLAR_NETWORK_PASSPHRASE="%s" with literal quote
+  // characters; the stored value was `"Test SDF Network ; September 2015"`,
+  // which is not the testnet passphrase and must not be silently accepted.
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK_PASSPHRASE: '"Test SDF Network ; September 2015"',
+  }));
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(
+      result.invalid.some((item) => item.startsWith('STELLAR_NETWORK_PASSPHRASE')),
+      true,
+    );
   }
 });

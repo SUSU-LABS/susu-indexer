@@ -21,7 +21,7 @@ export type IndexerConfig = {
   rpcUrl: string;
   /** Stellar network name. Mainnet requires explicit opt-in. */
   network: 'local' | 'testnet' | 'mainnet';
-  /** Stellar network passphrase, for decoding network-scoped data. */
+  /** Stellar network passphrase. Must match STELLAR_NETWORK for named networks; free-form for `local`. */
   networkPassphrase: string;
   /** Factory contract whose events seed group discovery. */
   factoryContractId: string;
@@ -40,6 +40,17 @@ export type ConfigResult =
   | { ok: false; missing: string[]; invalid: string[] };
 
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
+
+/**
+ * The canonical passphrase for each named Stellar network.
+ *
+ * `local` is absent on purpose: a local cluster's passphrase is whatever the
+ * cluster was started with, so any non-empty value is accepted for it.
+ */
+const KNOWN_NETWORK_PASSPHRASES = {
+  testnet: 'Test SDF Network ; September 2015',
+  mainnet: 'Public Global Stellar Network ; September 2015',
+} as const;
 
 function readString(env: Record<string, string | undefined>, key: string): string | undefined {
   const value = env[key];
@@ -131,6 +142,22 @@ export function loadConfig(
     invalid.push('STELLAR_NETWORK=mainnet requires ALLOW_MAINNET=true (explicit approval)');
   }
 
+  // The passphrase identifies which network the config points at. Nothing
+  // network-scoped is decoded yet, but a passphrase that disagrees with
+  // STELLAR_NETWORK means one of the two is wrong — historically a quoting
+  // bug in the deploy script stored literal quote characters — and every
+  // consumer of either value would silently disagree about the network.
+  // `local` accepts any passphrase: its value is a local-cluster choice.
+  const networkPassphrase = values['STELLAR_NETWORK_PASSPHRASE'] as string;
+  const expectedPassphrase = network === 'testnet' || network === 'mainnet'
+    ? KNOWN_NETWORK_PASSPHRASES[network]
+    : null;
+  if (expectedPassphrase !== null && networkPassphrase !== expectedPassphrase) {
+    invalid.push(
+      `STELLAR_NETWORK_PASSPHRASE (for STELLAR_NETWORK=${network} it must be exactly "${expectedPassphrase}")`,
+    );
+  }
+
   const maxLedgers = readPositiveInt(env, 'INDEXER_MAX_LEDGER_RANGE', 1000);
   if (!maxLedgers.valid || maxLedgers.value > 100_000) {
     invalid.push('INDEXER_MAX_LEDGER_RANGE (must be an integer between 1 and 100000)');
@@ -153,7 +180,7 @@ export function loadConfig(
       taskSecret,
       rpcUrl,
       network,
-      networkPassphrase: values['STELLAR_NETWORK_PASSPHRASE'] as string,
+      networkPassphrase,
       factoryContractId,
       usdcContractId,
       startLedger: startLedger.value,
