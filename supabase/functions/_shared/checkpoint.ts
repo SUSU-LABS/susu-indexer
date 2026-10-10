@@ -47,8 +47,13 @@ export function computeLedgerRange(params: {
   latestLedger: number;
   startLedger: number;
   maxRange: number;
+  onStartLedgerIgnored?: (info: {
+    startLedger: number;
+    lastProcessedLedger: number;
+    resumedAt: number;
+  }) => void;
 }): LedgerRange | null {
-  const { lastProcessedLedger, latestLedger, startLedger, maxRange } = params;
+  const { lastProcessedLedger, latestLedger, startLedger, maxRange, onStartLedgerIgnored } = params;
 
   if (!Number.isSafeInteger(latestLedger) || latestLedger < 0) {
     throw new Error('latestLedger must be a non-negative safe integer');
@@ -65,9 +70,19 @@ export function computeLedgerRange(params: {
     }
   }
 
-  const from = lastProcessedLedger === null
-    ? startLedger
-    : Math.max(lastProcessedLedger + 1, startLedger);
+  let from: number;
+  if (lastProcessedLedger === null) {
+    from = startLedger;
+  } else {
+    from = lastProcessedLedger + 1;
+    if (startLedger > from) {
+      onStartLedgerIgnored?.({
+        startLedger,
+        lastProcessedLedger,
+        resumedAt: from,
+      });
+    }
+  }
 
   if (from > latestLedger) return null;
 

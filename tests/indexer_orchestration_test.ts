@@ -82,6 +82,10 @@ class StubSupabaseClient {
   callsTo(table: string, op: StubCall['op']): StubCall[] {
     return this.calls.filter((c) => c.table === table && c.op === op);
   }
+
+  rpc(_fn: string, _args: Record<string, unknown>): Promise<{ data: unknown; error: unknown }> {
+    return Promise.resolve({ data: [], error: null });
+  }
 }
 
 type Filter = { column: string; op: 'eq' | 'in' | 'lt'; value: unknown };
@@ -504,6 +508,9 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
     // The acceptance criterion: the checkpoint is untouched, so the next run
     // retries the same range instead of skipping it.
     assertEquals(stub.callsTo('indexer_checkpoints', 'upsert'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'update'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'insert'), []);
+    assertEquals(stub.rows('indexer_checkpoints'), []);
 
     // ...but the failure is on record for operators.
     const runs = stub.rows('indexer_runs');
@@ -553,10 +560,10 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // The tip is recorded so lag alerts do not go stale, but no event writes occurred.
     assertEquals(
       stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      [{ op: 'update', table: 'indexer_checkpoints' }],
     );
     assertEquals(rpc.requests, []);
   } finally {
