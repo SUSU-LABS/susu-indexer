@@ -76,6 +76,38 @@ export function computeLedgerRange(params: {
 }
 
 /**
+ * Whether the reported chain tip has regressed behind what the indexer has
+ * already processed — or, on a first run, behind the deployment ledger.
+ *
+ * A regressed tip is not "caught up": it usually means the RPC provider is
+ * lagging, or the indexer is pointed at the wrong network. Callers should
+ * surface this loudly rather than reporting a healthy skip.
+ */
+export function isTipRegression(params: {
+  lastProcessedLedger: number | null;
+  latestLedger: number;
+  startLedger: number;
+}): boolean {
+  const { lastProcessedLedger, latestLedger, startLedger } = params;
+  if (lastProcessedLedger === null) return latestLedger < startLedger;
+  return latestLedger < lastProcessedLedger;
+}
+
+/**
+ * Classifies a null ledger range: either the indexer is genuinely caught up
+ * (`'skipped'`) or the chain tip has regressed behind the checkpoint
+ * (`'tip_regression'`) — a lagging provider or the wrong network, which must
+ * surface loudly instead of looking like a healthy idle run.
+ */
+export function classifyNullRange(params: {
+  lastProcessedLedger: number | null;
+  latestLedger: number;
+  startLedger: number;
+}): 'skipped' | 'tip_regression' {
+  return isTipRegression(params) ? 'tip_regression' : 'skipped';
+}
+
+/**
  * Decides whether a candidate checkpoint may advance the stored one.
  *
  * Returns `false` for equal or lower ledgers, so a retried run is a no-op rather
