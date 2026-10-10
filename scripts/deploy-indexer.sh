@@ -32,7 +32,9 @@
 # Optional environment:
 #   STELLAR_RPC_URL             Defaults to the public Testnet endpoint.
 #   STELLAR_NETWORK             local | testnet | mainnet. Defaults to testnet.
-#   STELLAR_NETWORK_PASSPHRASE  Must match STELLAR_NETWORK.
+#   STELLAR_NETWORK_PASSPHRASE  Defaults to the canonical SDF passphrase for
+#                               STELLAR_NETWORK. An explicit value must match
+#                               the network; the function rejects a mismatch.
 #   INDEXER_MAX_LEDGER_RANGE    Ledgers per run. Defaults to 1000.
 #
 # Note: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided by the platform
@@ -90,6 +92,29 @@ if ! [[ "$INDEXER_START_LEDGER" =~ ^[0-9]+$ ]] || [ "$INDEXER_START_LEDGER" -le 
   fail 'INDEXER_START_LEDGER must be a positive integer'
 fi
 
+# Resolve the network passphrase. testnet and mainnet have fixed SDF
+# passphrases; an explicit STELLAR_NETWORK_PASSPHRASE must equal the canonical
+# one, or the deployed function would refuse to start. A local chain's
+# passphrase is chosen by the operator, so any explicit value is accepted.
+case "${STELLAR_NETWORK:-testnet}" in
+  local)
+    network_passphrase="${STELLAR_NETWORK_PASSPHRASE:-Standalone Network ; February 2017}"
+    ;;
+  testnet)
+    network_passphrase="${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
+    [ "$network_passphrase" = 'Test SDF Network ; September 2015' ] \
+      || fail 'STELLAR_NETWORK_PASSPHRASE does not match STELLAR_NETWORK=testnet'
+    ;;
+  mainnet)
+    network_passphrase="${STELLAR_NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}"
+    [ "$network_passphrase" = 'Public Global Stellar Network ; September 2015' ] \
+      || fail 'STELLAR_NETWORK_PASSPHRASE does not match STELLAR_NETWORK=mainnet'
+    ;;
+  *)
+    fail 'STELLAR_NETWORK must be local, testnet or mainnet'
+    ;;
+esac
+
 report SUPABASE_ACCESS_TOKEN
 report SUPABASE_PROJECT_REF
 report INDEXER_TASK_SECRET
@@ -136,8 +161,7 @@ trap 'rm -f "$secrets_file"' EXIT
   printf 'INDEXER_START_LEDGER=%s\n' "$INDEXER_START_LEDGER"
   printf 'STELLAR_RPC_URL=%s\n' "${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}"
   printf 'STELLAR_NETWORK=%s\n' "${STELLAR_NETWORK:-testnet}"
-  printf 'STELLAR_NETWORK_PASSPHRASE="%s"\n' \
-    "${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
+  printf 'STELLAR_NETWORK_PASSPHRASE=%s\n' "$network_passphrase"
   printf 'INDEXER_MAX_LEDGER_RANGE=%s\n' "${INDEXER_MAX_LEDGER_RANGE:-1000}"
   printf 'ALLOW_MAINNET=%s\n' "${ALLOW_MAINNET:-false}"
 } >"$secrets_file"

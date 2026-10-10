@@ -82,7 +82,12 @@ Deno.test('rejects a non-https RPC URL', () => {
 });
 
 Deno.test('refuses mainnet without explicit opt-in', () => {
-  const result = loadConfig(validEnv({ STELLAR_NETWORK: 'mainnet' }));
+  const result = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'mainnet',
+      STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+    }),
+  );
   assertEquals(result.ok, false);
   if (!result.ok) {
     assertEquals(result.invalid.some((item) => item.includes('ALLOW_MAINNET')), true);
@@ -90,9 +95,62 @@ Deno.test('refuses mainnet without explicit opt-in', () => {
 });
 
 Deno.test('allows mainnet with explicit opt-in', () => {
-  const result = loadConfig(validEnv({ STELLAR_NETWORK: 'mainnet', ALLOW_MAINNET: 'true' }));
+  const result = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'mainnet',
+      ALLOW_MAINNET: 'true',
+      STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+    }),
+  );
   assertEquals(result.ok, true);
   if (result.ok) assertEquals(result.config.allowMainnet, true);
+});
+
+Deno.test('rejects a passphrase that does not match the network', () => {
+  const mismatches: Array<Record<string, string>> = [
+    // Testnet passphrase (validEnv default) under mainnet.
+    { STELLAR_NETWORK: 'mainnet', ALLOW_MAINNET: 'true' },
+    // Mainnet passphrase under testnet.
+    {
+      STELLAR_NETWORK: 'testnet',
+      STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+    },
+    // Standalone passphrase under testnet.
+    {
+      STELLAR_NETWORK: 'testnet',
+      STELLAR_NETWORK_PASSPHRASE: 'Standalone Network ; February 2017',
+    },
+    // Literal-quote artefact of the old deploy script.
+    {
+      STELLAR_NETWORK: 'testnet',
+      STELLAR_NETWORK_PASSPHRASE: '"Test SDF Network ; September 2015"',
+    },
+  ];
+  for (const overrides of mismatches) {
+    const result = loadConfig(validEnv(overrides));
+    assertEquals(result.ok, false, JSON.stringify(overrides));
+    if (!result.ok) {
+      assertEquals(
+        result.invalid.some((item) => item.startsWith('STELLAR_NETWORK_PASSPHRASE')),
+        true,
+        JSON.stringify(overrides),
+      );
+    }
+  }
+});
+
+Deno.test('accepts any non-empty passphrase for a local network', () => {
+  const result = loadConfig(
+    validEnv({
+      STELLAR_NETWORK: 'local',
+      STELLAR_NETWORK_PASSPHRASE: 'My Local Network ; Operator Choice 2026',
+    }),
+  );
+  assertEquals(result.ok, true);
+  if (result.ok) {
+    assertEquals(result.config.network, 'local');
+    assertEquals(result.config.networkPassphrase, 'My Local Network ; Operator Choice 2026');
+  }
 });
 
 Deno.test('rejects an unknown network', () => {
