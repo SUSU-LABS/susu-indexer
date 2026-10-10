@@ -136,6 +136,51 @@ Deno.test('computeLedgerRange rejects a negative checkpoint', () => {
   );
 });
 
+Deno.test('a raised startLedger does not skip ledgers when a checkpoint exists and fires warning callback', () => {
+  const warnings: { startLedger: number; lastProcessedLedger: number; resumedAt: number }[] = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: 1099,
+    latestLedger: 5000,
+    startLedger: 2000,
+    maxRange: 100,
+    onStartLedgerIgnored: (info) => warnings.push(info),
+  });
+
+  // Acceptance criterion: never advances past lastProcessedLedger + 1 because of a higher startLedger
+  assertEquals(range, { from: 1100, to: 1199, truncated: true });
+  assertEquals(warnings, [{ startLedger: 2000, lastProcessedLedger: 1099, resumedAt: 1100 }]);
+});
+
+Deno.test('the documented rebuild procedure runs without ignoring startLedger', () => {
+  const warnings: unknown[] = [];
+  // Rebuild procedure sets: last_processed_ledger = start_ledger - 1
+  const startLedger = 2000;
+  const range = computeLedgerRange({
+    lastProcessedLedger: startLedger - 1,
+    latestLedger: 5000,
+    startLedger,
+    maxRange: 100,
+    onStartLedgerIgnored: (info) => warnings.push(info),
+  });
+
+  assertEquals(range, { from: 2000, to: 2099, truncated: true });
+  assertEquals(warnings, []);
+});
+
+Deno.test('a first run without a checkpoint honors startLedger without warnings', () => {
+  const warnings: unknown[] = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: null,
+    latestLedger: 5000,
+    startLedger: 2000,
+    maxRange: 100,
+    onStartLedgerIgnored: (info) => warnings.push(info),
+  });
+
+  assertEquals(range, { from: 2000, to: 2099, truncated: true });
+  assertEquals(warnings, []);
+});
+
 // ---------------------------------------------------------------------------
 // Checkpoint advancement
 // ---------------------------------------------------------------------------
