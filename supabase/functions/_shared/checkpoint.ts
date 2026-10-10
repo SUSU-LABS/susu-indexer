@@ -76,6 +76,35 @@ export function computeLedgerRange(params: {
 }
 
 /**
+ * Classifies an empty ledger range: genuinely caught up, or the reported tip
+ * is *behind* what the checkpoint says has already been indexed.
+ *
+ * `computeLedgerRange` returns `null` for both, and for an operator the two
+ * are opposites. Caught up is health. A tip below the checkpoint means the RPC
+ * provider is lagging or the indexer is pointed at the wrong network, and
+ * reporting it as "nothing to index" makes that misconfiguration look like a
+ * healthy, idle indexer forever.
+ */
+export type TipComparison =
+  | { kind: 'caught-up' }
+  | { kind: 'tip-regression'; behindBy: number };
+
+export function classifyEmptyRange(params: {
+  lastProcessedLedger: number | null;
+  latestLedger: number;
+  startLedger: number;
+}): TipComparison {
+  // With a checkpoint, regression means the tip cannot even reach the last
+  // ledger already processed. Without one, the floor is the deployment ledger:
+  // a tip below it cannot be the network the contracts live on.
+  const reached = params.lastProcessedLedger ?? params.startLedger - 1;
+  if (params.latestLedger < reached) {
+    return { kind: 'tip-regression', behindBy: reached - params.latestLedger };
+  }
+  return { kind: 'caught-up' };
+}
+
+/**
  * Decides whether a candidate checkpoint may advance the stored one.
  *
  * Returns `false` for equal or lower ledgers, so a retried run is a no-op rather

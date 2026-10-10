@@ -2,6 +2,7 @@ import { assertEquals, assertThrows } from '@std/assert';
 import {
   canAdvanceCheckpoint,
   type Checkpoint,
+  classifyEmptyRange,
   computeLedgerRange,
   ledgerLag,
 } from '../supabase/functions/_shared/checkpoint.ts';
@@ -87,6 +88,56 @@ Deno.test('a checkpoint ahead of the chain head returns no range', () => {
       maxRange: 100,
     }),
     null,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Empty-range classification
+// ---------------------------------------------------------------------------
+
+Deno.test('an empty range at the checkpoint is caught up, not a regression', () => {
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: 5000,
+      latestLedger: 5000,
+      startLedger: 1000,
+    }),
+    { kind: 'caught-up' },
+  );
+});
+
+Deno.test('a tip below the checkpoint is a tip regression with the distance', () => {
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: 6000,
+      latestLedger: 5900,
+      startLedger: 1000,
+    }),
+    { kind: 'tip-regression', behindBy: 100 },
+  );
+});
+
+Deno.test('a first-run tip below the deployment ledger is a tip regression', () => {
+  // No checkpoint yet, and the provider cannot even see the ledger the
+  // contracts were deployed at: wrong network or hopelessly stale.
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: null,
+      latestLedger: 400,
+      startLedger: 1000,
+    }),
+    { kind: 'tip-regression', behindBy: 599 },
+  );
+});
+
+Deno.test('a first-run tip at or above the deployment ledger is caught up', () => {
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: null,
+      latestLedger: 999,
+      startLedger: 1000,
+    }),
+    { kind: 'caught-up' },
   );
 });
 
