@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  classifyEmptyRange,
+  computeLedgerRange,
+  ledgerLag,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -32,7 +37,7 @@ import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -55,7 +60,7 @@ type RequestDependencies = {
 };
 
 type RunSummary = {
-  status: 'ok' | 'skipped' | 'failed';
+  status: 'ok' | 'skipped' | 'failed' | 'tip_regression';
   correlationId: string;
   ledgerFrom?: number;
   ledgerTo?: number;
@@ -66,6 +71,9 @@ type RunSummary = {
   checkpoint?: number;
   lag?: number;
   reason?: string;
+  /** Present on `tip_regression`: the provider's tip, and how far behind it is. */
+  latestLedger?: number;
+  behindBy?: number;
 };
 
 function jsonResponse(body: RunSummary, status: number): Response {
@@ -169,6 +177,36 @@ export async function handleRequest(
     });
 
     if (range === null) {
+      const tip = classifyEmptyRange({
+        lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
+        latestLedger,
+        startLedger: checkpoint?.startLedger ?? config.startLedger,
+      });
+
+      if (tip.kind === 'tip-regression') {
+        // A tip below the checkpoint is not "nothing to index": it is an RPC
+        // provider lagging behind its own earlier answers, or a misconfigured
+        // URL on the wrong network. The latest ledger is deliberately not
+        // recorded here — writing a tip below the checkpoint would zero the lag
+        // alert and hide exactly the condition operators need to see.
+        logger.warn('Chain tip is behind the indexer checkpoint', {
+          reason: 'tip_regression',
+          latestLedger,
+          checkpoint: checkpoint?.lastProcessedLedger,
+          behindBy: tip.behindBy,
+        });
+        return jsonResponse(
+          {
+            status: 'tip_regression',
+            correlationId,
+            checkpoint: checkpoint?.lastProcessedLedger,
+            latestLedger,
+            behindBy: tip.behindBy,
+          },
+          200,
+        );
+      }
+
       logger.info('Nothing to index', { latestLedger });
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the
