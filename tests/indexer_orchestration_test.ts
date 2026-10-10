@@ -516,6 +516,9 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
     // The acceptance criterion: the checkpoint is untouched, so the next run
     // retries the same range instead of skipping it.
     assertEquals(stub.callsTo('indexer_checkpoints', 'upsert'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'update'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'insert'), []);
+    assertEquals(stub.rows('indexer_checkpoints'), []);
 
     // ...but the failure is on record for operators.
     const runs = stub.rows('indexer_runs');

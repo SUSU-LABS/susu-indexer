@@ -215,3 +215,16 @@ Deno.test('PGlite: reconcile_group_states updates existing rows and returns miss
     await pg.close();
   }
 });
+
+Deno.test('PGlite: bulk reconciliation is not executable by an unprivileged role', async () => {
+  const pg = await freshPglite();
+  try {
+    await pg.exec('create role browser nologin;');
+    const result = await pg.query<{ allowed: boolean }>(
+      "select has_function_privilege('browser', 'public.reconcile_group_states(jsonb)', 'execute') as allowed",
+    );
+    assertEquals(result.rows[0]?.allowed, false);
+  } finally {
+    await pg.close();
+  }
+});

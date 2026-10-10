@@ -66,4 +66,6 @@ $function$;
 comment on function public.reconcile_group_states(jsonb) is
   'Bulk UPDATE of derived group state. Returns the contract_ids that had no groups row; the caller treats a non-empty result as an error.';
 
+revoke all on function public.reconcile_group_states(jsonb) from public;
+
 grant execute on function public.reconcile_group_states(jsonb) to service_role;
