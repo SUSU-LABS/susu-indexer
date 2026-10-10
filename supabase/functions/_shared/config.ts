@@ -41,6 +41,20 @@ export type ConfigResult =
 
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
 
+/**
+ * Canonical network passphrases for the public Stellar networks.
+ *
+ * `local` networks use operator-chosen passphrases, so any value is accepted
+ * there. For `testnet`/`mainnet` the passphrase is a public constant, and a
+ * mismatch means the operator pointed the indexer at the wrong network (or
+ * copied the wrong secret), so `loadConfig` rejects it rather than indexing
+ * the wrong chain.
+ */
+const KNOWN_NETWORK_PASSPHRASES: Record<string, string> = {
+  testnet: 'Test SDF Network ; September 2015',
+  mainnet: 'Public Global Stellar Network ; September 2015',
+};
+
 function readString(env: Record<string, string | undefined>, key: string): string | undefined {
   const value = env[key];
   if (value === undefined) return undefined;
@@ -131,6 +145,19 @@ export function loadConfig(
     invalid.push('STELLAR_NETWORK=mainnet requires ALLOW_MAINNET=true (explicit approval)');
   }
 
+  // The passphrase is otherwise unused by the indexer (it never signs
+  // transactions), but a mismatch with STELLAR_NETWORK means the operator
+  // configured the wrong network, so it is rejected here. Only the public
+  // canonical passphrase is echoed; the configured value is never logged.
+  const networkPassphrase = values['STELLAR_NETWORK_PASSPHRASE'] as string;
+  const expectedPassphrase = KNOWN_NETWORK_PASSPHRASES[network];
+  if (expectedPassphrase !== undefined && networkPassphrase !== expectedPassphrase) {
+    invalid.push(
+      `STELLAR_NETWORK_PASSPHRASE (does not match STELLAR_NETWORK=${network}; ` +
+        `expected "${expectedPassphrase}")`,
+    );
+  }
+
   const maxLedgers = readPositiveInt(env, 'INDEXER_MAX_LEDGER_RANGE', 1000);
   if (!maxLedgers.valid || maxLedgers.value > 100_000) {
     invalid.push('INDEXER_MAX_LEDGER_RANGE (must be an integer between 1 and 100000)');
@@ -153,7 +180,7 @@ export function loadConfig(
       taskSecret,
       rpcUrl,
       network,
-      networkPassphrase: values['STELLAR_NETWORK_PASSPHRASE'] as string,
+      networkPassphrase,
       factoryContractId,
       usdcContractId,
       startLedger: startLedger.value,
