@@ -12,7 +12,7 @@ const MIGRATIONS = [
   'supabase/migrations/20260816000000_chain_derived.sql',
   'supabase/migrations/20260914000000_indexer_alerts.sql',
   'supabase/migrations/20261009000001_ledger_lag_alert.sql',
-  'supabase/migrations/20261010000000_inflight_cron_runs_not_failed.sql',
+  'supabase/migrations/20261011000002_inflight_cron_runs_not_failed.sql',
 ];
 
 async function freshDb(): Promise<PGlite> {
