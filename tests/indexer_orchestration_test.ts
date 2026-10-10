@@ -70,6 +70,19 @@ class StubSupabaseClient {
     return new StubBuilder(this, table);
   }
 
+  /**
+   * Stub for the `derive_group_state` Postgres RPC that `readDerivedGroupState`
+   * calls. Returns no rows: the orchestration tests assert on indexed events,
+   * checkpoints and discovered groups, not on the reconciled aggregates (the
+   * equivalence test in `derive_group_state_test.ts` pins the SQL itself).
+   */
+  rpc(
+    _fn: string,
+    _params: Record<string, unknown>,
+  ): Promise<{ data: Record<string, unknown>[]; error: null }> {
+    return Promise.resolve({ data: [], error: null });
+  }
+
   rows(table: string): Row[] {
     let rows = this.tables.get(table);
     if (!rows) {
@@ -553,10 +566,16 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // The skip path still observes the tip: recordLatestLedger writes the
+    // latest ledger so the lag alert's input doesn't go stale while the
+    // indexer looks idle. No events are read or written.
+    const nonSelectCalls = stub.calls.filter((call) => call.op !== 'select');
+    assertEquals(nonSelectCalls.length, 1);
+    assertEquals(nonSelectCalls[0]?.table, 'indexer_checkpoints');
+    assertEquals(nonSelectCalls[0]?.op, 'update');
     assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      stub.rows('indexer_checkpoints')[0]?.['last_seen_latest_ledger'],
+      SCENARIO_HEAD,
     );
     assertEquals(rpc.requests, []);
   } finally {
