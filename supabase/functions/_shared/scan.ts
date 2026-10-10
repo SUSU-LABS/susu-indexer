@@ -20,7 +20,7 @@
  * problem, which is what it is for.
  */
 
-import { withRetry } from './retry.ts';
+import { isRetryableError, type RetryOptions, withRetry } from './retry.ts';
 import type { EventPageStart, GetEventsResult, RpcEvent } from './stellar.ts';
 
 /** Events requested per page. */
@@ -48,7 +48,12 @@ export const MAX_CONTRACT_IDS_PER_FILTER = 5;
 export const MAX_PAGES = 1_000;
 
 /** Bounded retry policy for transient RPC failures during a scan. */
-const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
+const RETRY = {
+  attempts: 4,
+  baseDelayMs: 250,
+  maxDelayMs: 4_000,
+  isRetryable: isRetryableError,
+} as const;
 
 /**
  * The slice of the RPC client a scan needs.
@@ -86,6 +91,7 @@ export async function fetchRangeEvents(
   contractIds: readonly string[],
   from: number,
   to: number,
+  retry: RetryOptions = RETRY,
 ): Promise<RpcEvent[]> {
   if (contractIds.length === 0) return [];
   if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from > to) {
@@ -102,7 +108,7 @@ export async function fetchRangeEvents(
 
   const collected: RpcEvent[] = [];
   for (const chunk of chunks) {
-    collected.push(...(await fetchChunk(rpc, chunk, from, to)));
+    collected.push(...(await fetchChunk(rpc, chunk, from, to, retry)));
   }
 
   return collected;
@@ -114,9 +120,10 @@ async function fetchChunk(
   ids: string[],
   from: number,
   to: number,
+  retry: RetryOptions,
 ): Promise<RpcEvent[]> {
   const fetchPage = (start: EventPageStart): Promise<GetEventsResult> =>
-    withRetry(() => rpc.getEvents({ ...start, contractIds: ids, limit: PAGE_LIMIT }), RETRY);
+    withRetry(() => rpc.getEvents({ ...start, contractIds: ids, limit: PAGE_LIMIT }), retry);
 
   const collected: RpcEvent[] = [];
   let previousCursor: string | undefined;
