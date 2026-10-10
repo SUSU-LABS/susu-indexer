@@ -63,6 +63,7 @@ class StubSupabaseClient {
   readonly calls: StubCall[] = [];
   /** When set, this operation throws instead of executing. */
   failOn: StubCall | null = null;
+  failIndexedAfter: number | null = null;
   /** When set, this operation returns `{ error }` instead of executing. */
   errorOn: StubCall | null = null;
 
@@ -81,6 +82,10 @@ class StubSupabaseClient {
 
   callsTo(table: string, op: StubCall['op']): StubCall[] {
     return this.calls.filter((c) => c.table === table && c.op === op);
+  }
+
+  rpc(_fn: string, _args?: Record<string, unknown>): Promise<{ data: unknown; error: unknown }> {
+    return Promise.resolve({ data: [], error: null });
   }
 }
 
@@ -191,6 +196,13 @@ class StubBuilder {
   #run(): Promise<unknown> {
     const mode = this.#mode;
     if (mode === null) return Promise.reject(new Error('stub: builder awaited with no operation'));
+    if (
+      this.#table === 'indexed_events' && mode === 'upsert' &&
+      this.#client.failIndexedAfter !== null &&
+      this.#client.callsTo('indexed_events', 'upsert').length >= this.#client.failIndexedAfter
+    ) {
+      return Promise.reject(new Error('middle batch unavailable'));
+    }
     const failOn = this.#client.failOn;
     if (failOn !== null && failOn.table === this.#table && failOn.op === mode) {
       return Promise.reject(new Error(`stubbed failure: ${mode} on ${this.#table}`));
@@ -264,16 +276,19 @@ class ScriptedRpc implements RpcSource {
   ): Promise<GetEventsResult> {
     const { limit: _limit, ...recorded } = params;
     this.requests.push(recorded);
-    if (params.kind === 'range') {
-      const ids = new Set(params.contractIds);
-      const events = this.events.filter((event) =>
-        ids.has(event.contractId) &&
-        event.ledger >= params.startLedger &&
-        event.ledger < params.endLedger
-      );
-      return Promise.resolve({ events });
-    }
-    return Promise.resolve({ events: [] });
+    const ids = new Set(params.contractIds);
+    const start = params.kind === 'range' ? 0 : Number(params.cursor);
+    const limit = params.limit ?? 1000;
+    const matching = this.events.filter((event) =>
+      ids.has(event.contractId) &&
+      (params.kind === 'cursor' ||
+        (event.ledger >= params.startLedger && event.ledger < params.endLedger))
+    );
+    const events = matching.slice(start, start + limit);
+    return Promise.resolve({
+      events,
+      cursor: events.length === limit ? String(start + limit) : undefined,
+    });
   }
 }
 
@@ -504,6 +519,9 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
     // The acceptance criterion: the checkpoint is untouched, so the next run
     // retries the same range instead of skipping it.
     assertEquals(stub.callsTo('indexer_checkpoints', 'upsert'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'update'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'insert'), []);
+    assertEquals(stub.rows('indexer_checkpoints'), []);
 
     // ...but the failure is on record for operators.
     const runs = stub.rows('indexer_runs');
@@ -553,10 +571,10 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // The tip is recorded so lag alerts do not go stale, but no event writes occurred.
     assertEquals(
       stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      [{ op: 'update', table: 'indexer_checkpoints' }],
     );
     assertEquals(rpc.requests, []);
   } finally {
@@ -651,6 +669,27 @@ Deno.test('handleRequest returns structured 500 even when recordRunFailure inser
     const body = await response.json();
     assertEquals(body.status, 'failed');
     assertEquals(body.reason, 'RPC endpoint unavailable');
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a middle-batch failure preserves persisted rows but never advances checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const sample = factoryEvent(5);
+    const events = Array.from(
+      { length: 3000 },
+      (_, i) => ({ ...sample, eventIndex: i, id: `batch-${i}` }),
+    );
+    const { stub, db, rpc } = makeDeps(events, SCENARIO_HEAD);
+    stub.failIndexedAfter = 1;
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 500);
+    assertEquals(stub.rows('indexed_events').length, 1000);
+    assertEquals(stub.rows('indexer_checkpoints'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'insert'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'update'), []);
   } finally {
     restoreEnv();
   }
