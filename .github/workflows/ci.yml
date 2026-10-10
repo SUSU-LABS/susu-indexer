@@ -38,7 +38,9 @@ jobs:
         run: deno check supabase/functions/indexer/index.ts
 
       - name: Test
-        run: deno test --allow-env tests/
+        # Uses the repo's canonical test task (deno.json), which grants the
+        # --allow-read pglite needs for its WASM data file.
+        run: deno task test
 
       - name: Secret scan (gitleaks)
         run: |
