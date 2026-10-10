@@ -63,11 +63,34 @@ class StubSupabaseClient {
   readonly calls: StubCall[] = [];
   /** When set, this operation throws instead of executing. */
   failOn: StubCall | null = null;
+  /**
+   * Transient counterpart of {@link failOn}: each entry throws while its
+   * remaining count is positive, then lets the operation through — the shape a
+   * dependency that fails once and recovers takes.
+   */
+  failTimes: Array<StubCall & { times: number }> = [];
   /** When set, this operation returns `{ error }` instead of executing. */
   errorOn: StubCall | null = null;
 
   from(table: string): StubBuilder {
     return new StubBuilder(this, table);
+  }
+
+  /**
+   * PostgREST RPC surface used by `readDerivedGroupState`. Returns an empty
+   * derivation — orchestration tests assert write ordering and checkpoint
+   * movement, not the derived figures, which `derive_group_state_test.ts`
+   * checks against a real Postgres.
+   */
+  rpc(
+    name: string,
+    _params: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: { message: string } | null }> {
+    this.calls.push({ table: `rpc:${name}`, op: 'select' });
+    if (name !== 'derive_group_state') {
+      return Promise.resolve({ data: null, error: { message: `stub: unexpected rpc ${name}` } });
+    }
+    return Promise.resolve({ data: [], error: null });
   }
 
   rows(table: string): Row[] {
@@ -195,6 +218,14 @@ class StubBuilder {
     if (failOn !== null && failOn.table === this.#table && failOn.op === mode) {
       return Promise.reject(new Error(`stubbed failure: ${mode} on ${this.#table}`));
     }
+    const transient = this.#client.failTimes.find((t) =>
+      t.times > 0 && t.table === this.#table && t.op === mode
+    );
+    if (transient) {
+      transient.times--;
+      this.#client.calls.push({ table: this.#table, op: mode });
+      return Promise.reject(new Error(`stubbed transient failure: ${mode} on ${this.#table}`));
+    }
     const errorOn = this.#client.errorOn;
     if (errorOn !== null && errorOn.table === this.#table && errorOn.op === mode) {
       this.#client.calls.push({ table: this.#table, op: mode });
@@ -249,6 +280,8 @@ class StubBuilder {
  */
 class ScriptedRpc implements RpcSource {
   readonly requests: Array<EventPageStart & { contractIds: string[] }> = [];
+  /** When > 0, each getEvents call fails once before decrementing. */
+  failNextGetEvents = 0;
 
   constructor(
     private readonly events: readonly RpcEvent[],
@@ -264,6 +297,10 @@ class ScriptedRpc implements RpcSource {
   ): Promise<GetEventsResult> {
     const { limit: _limit, ...recorded } = params;
     this.requests.push(recorded);
+    if (this.failNextGetEvents > 0) {
+      this.failNextGetEvents--;
+      return Promise.reject(new Error('stubbed transient getEvents failure'));
+    }
     if (params.kind === 'range') {
       const ids = new Set(params.contractIds);
       const events = this.events.filter((event) =>
@@ -494,9 +531,15 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
   const restoreEnv = withTestEnv();
   try {
     const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // The write fails on every attempt: a permanent failure, not a blip.
     stub.failOn = { table: 'indexed_events', op: 'upsert' };
+    const { sleep } = recordingSleep();
 
-    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    const response = await handleRequest(authorizedRequest(), {
+      db,
+      rpc,
+      retry: fastRetry(sleep),
+    });
     assertEquals(response.status, 500);
     const body = await response.json();
     assertEquals(body.status, 'failed');
@@ -515,6 +558,83 @@ Deno.test('a failed run records the failure and never advances the checkpoint', 
     // operator reading indexer_runs knows which ledgers to retry.
     assertEquals(runs[0]?.['ledger_from'], SCENARIO_FROM);
     assertEquals(runs[0]?.['ledger_to'], SCENARIO_HEAD);
+  } finally {
+    restoreEnv();
+  }
+});
+
+/** Records delays instead of sleeping, so failure-injection runs are instant. */
+function recordingSleep(): { delays: number[]; sleep: (ms: number) => Promise<void> } {
+  const delays: number[] = [];
+  return {
+    delays,
+    sleep: (ms: number) => {
+      delays.push(ms);
+      return Promise.resolve();
+    },
+  };
+}
+
+/** Retry policy for failure-injection tests: bounded, exponential, no waiting. */
+function fastRetry(sleep: (ms: number) => Promise<void>) {
+  return { attempts: 4, baseDelayMs: 1, maxDelayMs: 4, sleep };
+}
+
+Deno.test('a transient getEvents failure followed by success yields a normal run', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { delays, sleep } = recordingSleep();
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // The RPC fails twice, then recovers: the shape of a blip, not an outage.
+    rpc.failNextGetEvents = 2;
+
+    const response = await handleRequest(authorizedRequest(), {
+      db,
+      rpc,
+      retry: fastRetry(sleep),
+    });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+      'the checkpoint advanced exactly once, after the recovered attempt',
+    );
+    // The two failed attempts slept between retries; the success did not.
+    assertEquals(delays, [1, 2]);
+    // No failure row: an attempt that recovers is invisible to operators.
+    assertEquals(stub.rows('indexer_runs'), []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a transient upsert failure followed by success yields a normal run', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { delays, sleep } = recordingSleep();
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // The database write fails once, then succeeds on retry.
+    stub.failTimes = [{ table: 'indexed_events', op: 'upsert', times: 1 }];
+
+    const response = await handleRequest(authorizedRequest(), {
+      db,
+      rpc,
+      retry: fastRetry(sleep),
+    });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+    assert((body.eventsIndexed ?? 0) > 0, 'the events must still be indexed');
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
+    assertEquals(delays, [1]);
+    assertEquals(stub.rows('indexer_runs'), []);
   } finally {
     restoreEnv();
   }
@@ -553,12 +673,16 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
-    assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
-      [],
-    );
+    // No event reads and no checkpoint movement. The observed tip *is* still
+    // recorded (an update on indexer_checkpoints) — without that write the lag
+    // alert's input freezes exactly when the indexer looks idle but healthy.
     assertEquals(rpc.requests, []);
+    assertEquals(stub.callsTo('indexed_events', 'upsert'), []);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'upsert'), []);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
   } finally {
     restoreEnv();
   }
