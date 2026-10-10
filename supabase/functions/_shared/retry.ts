@@ -60,3 +60,67 @@ export async function withRetry<T>(
   // Unreachable: the loop either returns or throws.
   throw lastError;
 }
+
+/**
+ * Classifies an error as worth retrying.
+ *
+ * Retrying a deterministic failure — a validation error, a Postgres
+ * constraint violation, a JSON-RPC `-32600` — cannot make it succeed: it
+ * burns the attempt budget and ~4s of backoff, spends RPC quota, and buries
+ * the real cause under a stack of identical failures. Only errors whose next
+ * occurrence might differ are retried:
+ *
+ * - network-level failures (fetch could not reach the peer at all);
+ * - HTTP 408 / 429 / 5xx, where the server asked for patience or failed
+ *   transiently;
+ * - JSON-RPC *server* error codes (-32000..-32099), the range the spec
+ *   reserves for server-side conditions — as opposed to -326xx
+ *   (parse/invalid/method-not-found) and -327xx (parse error), which are
+ *   the request's own fault and will fail identically on every attempt;
+ * - database messages that read as transport or availability problems
+ *   (connection reset, timeout, "terminating connection", "too many
+ *   clients"), as opposed to constraint/integrity violations (duplicate
+ *   key, foreign key, check constraint) which are deterministic.
+ *
+ * Anything unrecognised — including non-Error rejections — is retried: an
+ * unknown transport failure should not be classified as permanent by
+ * accident. Callers that know better (a deterministic client bug) can pass a
+ * narrower `isRetryable` to {@linkcode withRetry}.
+ */
+export function isRetryableError(error: unknown): boolean {
+  if (error instanceof Error) {
+    if (error.name === 'TypeError') {
+      // fetch-level failures: "error sending request for url", "dns error",
+      // "connection refused", "network connection was lost".
+      return true;
+    }
+
+    const withStatus = error as Error & { status?: unknown };
+    if (typeof withStatus.status === 'number') {
+      return (
+        withStatus.status === 408 ||
+        withStatus.status === 429 ||
+        withStatus.status >= 500
+      );
+    }
+
+    const rpcCode = /RPC error (-?\d+)/.exec(error.message)?.[1];
+    if (rpcCode !== undefined) {
+      const code = Number(rpcCode);
+      return code <= -32000 && code >= -32099;
+    }
+
+    if (
+      /connection (refused|reset|terminated|closed)|econnreset|etimedout|econnrefused|socket hang up|network connection was lost|too many clients|terminating connection due to|still in use|could not connect/i
+        .test(error.message)
+    ) {
+      return true;
+    }
+
+    // Constraint violations, bad input, unrecognised application errors:
+    // deterministic. They will fail the same way on every attempt.
+    return false;
+  }
+
+  return true;
+}
