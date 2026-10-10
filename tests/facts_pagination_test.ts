@@ -11,7 +11,7 @@ Deno.test('readGroupFacts pages through contributions exceeding PostgREST cap an
   const mockContributions = Array.from({ length: TOTAL_CONTRIBUTIONS }, (_, i) => ({
     contract_id: contractId,
     round: (i % 10) + 1,
-    amount: CONTRIBUTION_AMOUNT,
+    amount: (BigInt(i + 1) * BigInt(CONTRIBUTION_AMOUNT)).toString(),
   }));
 
   const recordedRanges: { table: string; from: number; to: number }[] = [];
@@ -50,6 +50,7 @@ Deno.test('readGroupFacts pages through contributions exceeding PostgREST cap an
 
   // Acceptance Criterion: A paged-stub test asserts all rows are read
   assertEquals(facts.contributions.length, TOTAL_CONTRIBUTIONS);
+  assertEquals(new Set(facts.contributions.map((row) => row.amount)).size, TOTAL_CONTRIBUTIONS);
 
   // Range calls for contributions: 0-999, 1000-1999, 2000-2999
   const contribRanges = recordedRanges.filter((r) => r.table === 'contributions');
@@ -61,9 +62,10 @@ Deno.test('readGroupFacts pages through contributions exceeding PostgREST cap an
 
   // Acceptance Criterion: A group with more contributions than the PostgREST cap derives the correct total
   const derived = deriveGroupState(contractId, facts);
-  const expectedTotal = (BigInt(TOTAL_CONTRIBUTIONS) * BigInt(CONTRIBUTION_AMOUNT)).toString();
+  const expectedTotal = (BigInt(TOTAL_CONTRIBUTIONS) * BigInt(TOTAL_CONTRIBUTIONS + 1) / 2n *
+    BigInt(CONTRIBUTION_AMOUNT)).toString();
   assertEquals(derived.contributed_total, expectedTotal);
-  assertEquals(derived.contributed_total, '25000000000');
+  assertEquals(derived.contributed_total, '31262500000000');
 });
 
 Deno.test('readGroupFacts chunks large contract_id list to avoid exceeding URL limits', async () => {
@@ -288,12 +290,12 @@ Deno.test('paged-stub test with >1000 rows and shuffled slices returns every row
   const allContributions = Array.from({ length: TOTAL_CONTRIBUTIONS }, (_, i) => ({
     contract_id: contractId,
     round: (i % 10) + 1,
-    amount: CONTRIBUTION_AMOUNT,
+    amount: (BigInt(i + 1) * BigInt(CONTRIBUTION_AMOUNT)).toString(),
     event_identity: `evt_${String(i).padStart(6, '0')}`,
   }));
 
   // Shuffle mock rows into non-deterministic storage order
-  const shuffledContributions = [...allContributions].sort(() => Math.random() - 0.5);
+  const shuffledContributions = [...allContributions].reverse();
 
   const orderCalls: string[] = [];
 
@@ -344,6 +346,7 @@ Deno.test('paged-stub test with >1000 rows and shuffled slices returns every row
 
   // Verify all 2500 rows are returned exactly once
   assertEquals(facts.contributions.length, TOTAL_CONTRIBUTIONS);
+  assertEquals(new Set(facts.contributions.map((row) => row.amount)).size, TOTAL_CONTRIBUTIONS);
 
   // Verify every contribution amount and round was captured
   const totalAmount = facts.contributions.reduce(
@@ -352,11 +355,12 @@ Deno.test('paged-stub test with >1000 rows and shuffled slices returns every row
   );
   assertEquals(
     totalAmount.toString(),
-    (BigInt(TOTAL_CONTRIBUTIONS) * BigInt(CONTRIBUTION_AMOUNT)).toString(),
+    (BigInt(TOTAL_CONTRIBUTIONS) * BigInt(TOTAL_CONTRIBUTIONS + 1) / 2n *
+      BigInt(CONTRIBUTION_AMOUNT)).toString(),
   );
 
   // Acceptance Criterion: Fact derivation is correct on a paged response
   const derived = deriveGroupState(contractId, facts);
-  assertEquals(derived.contributed_total, '25000000000');
+  assertEquals(derived.contributed_total, '31262500000000');
   assertEquals(derived.status, 'open');
 });
