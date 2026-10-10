@@ -26,7 +26,7 @@ Deno.test('every captured Testnet event decodes', () => {
 
   assertEquals(rejected, []);
   assertEquals(events.length, allEvents.length);
-  assertEquals(events.length, 26);
+  assertEquals(events.length, 29);
 });
 
 Deno.test('the captured events cover both contracts and their full vocabulary', () => {
@@ -37,10 +37,13 @@ Deno.test('the captured events cover both contracts and their full vocabulary', 
     'completed',
     'contribution',
     'fee',
+    'fee_updated',
     'group_created',
     'join',
+    'pause_updated',
     'payout',
     'start',
+    'treasury_updated',
   ]);
 
   const contracts = [...new Set(events.map((event) => event.contractId))].sort();
@@ -68,6 +71,77 @@ Deno.test('a contribution decodes its member, round and amount', () => {
   assertEquals(event.round, 1);
   assertEquals(event.amount, '100000000');
   assertEquals(event.member.startsWith('G'), true);
+});
+
+Deno.test('fee_updated decodes its basis-point fee', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'fee_updated');
+  if (event?.name !== 'fee_updated') throw new Error('no fee_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.feeBps, 250);
+});
+
+Deno.test('fee_updated with a wrong topic count is rejected', () => {
+  const base = factoryEvents.find((e) => {
+    const r = decodeChainEvent(e);
+    return r.ok && r.event.name === 'fee_updated';
+  });
+  if (!base) throw new Error('no fee_updated event in the fixture');
+  // fee_updated expects exactly 2 topics; a third topic must fail, not decode.
+  const extraTopic = { ...base, topic: [...base.topic, symbolTopic('extra')] };
+
+  const result = decodeChainEvent(extraTopic);
+  assertEquals(result.ok, false);
+  if (!result.ok) assertEquals(result.reason.includes('expects 2 topics'), true);
+});
+
+Deno.test('treasury_updated decodes the treasury address from its topic', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'treasury_updated');
+  if (event?.name !== 'treasury_updated') {
+    throw new Error('no treasury_updated event in the fixture');
+  }
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.treasury.startsWith('G'), true);
+});
+
+Deno.test('treasury_updated with a wrong topic count is rejected', () => {
+  const base = factoryEvents.find((e) => {
+    const r = decodeChainEvent(e);
+    return r.ok && r.event.name === 'treasury_updated';
+  });
+  if (!base) throw new Error('no treasury_updated event in the fixture');
+  // treasury_updated expects exactly 3 topics; dropping the address topic must fail.
+  const missingTopic = { ...base, topic: base.topic.slice(0, 2) };
+
+  const result = decodeChainEvent(missingTopic);
+  assertEquals(result.ok, false);
+  if (!result.ok) assertEquals(result.reason.includes('expects 3 topics'), true);
+});
+
+Deno.test('pause_updated decodes its paused flag', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'pause_updated');
+  if (event?.name !== 'pause_updated') throw new Error('no pause_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.paused, true);
+});
+
+Deno.test('pause_updated with a non-boolean paused flag is rejected', () => {
+  const base = factoryEvents.find((e) => {
+    const r = decodeChainEvent(e);
+    return r.ok && r.event.name === 'pause_updated';
+  });
+  if (!base) throw new Error('no pause_updated event in the fixture');
+  // A u32 where a bool is expected: valid XDR map, wrong value type.
+  const wrongType = {
+    ...base,
+    value: 'AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAMAAAAB',
+  };
+
+  const result = decodeChainEvent(wrongType);
+  assertEquals(result.ok, false);
+  if (!result.ok) assertEquals(result.reason.includes('malformed'), true);
 });
 
 Deno.test('amounts stay exact integers rather than becoming numbers', () => {
