@@ -70,13 +70,13 @@ class StubSupabaseClient {
     return new StubBuilder(this, table);
   }
 
-  async rpc(fn: string, params: Record<string, unknown>): Promise<{ data: unknown; error: null }> {
+  rpc(fn: string, params: Record<string, unknown>): Promise<{ data: unknown; error: null }> {
     this.calls.push({ table: `rpc:${fn}`, op: 'select' });
     // The derive_group_state RPC aggregates facts in Postgres; the stub has no
     // SQL engine, so return no derived rows. Tests that need derived state
     // assert on the persisted group rows, not on the RPC itself.
     void params;
-    return { data: [], error: null };
+    return Promise.resolve({ data: [], error: null });
   }
 
   rows(table: string): Row[] {
