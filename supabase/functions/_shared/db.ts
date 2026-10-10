@@ -60,6 +60,23 @@ export type RejectedEventRow = {
   reason: string;
 };
 
+/**
+ * Deterministic tiebreaker columns for paged queries across tables read by `#selectIn`.
+ *
+ * PostgREST without an explicit `ORDER BY` does not guarantee stable rows
+ * across `OFFSET/LIMIT` pages under concurrent writes. Each table queried by
+ * `#selectIn` is ordered by `contract_id` plus a per-table tiebreaker to ensure
+ * deterministic row delivery across pages.
+ */
+export const TABLE_TIEBREAKERS: Record<string, readonly string[]> = {
+  groups: ['contract_id'],
+  group_members: ['contract_id', 'position'],
+  contributions: ['contract_id', 'round', 'event_identity'],
+  payouts: ['contract_id', 'round', 'event_identity'],
+  protocol_fees: ['contract_id', 'round', 'event_identity'],
+  decoded_events: ['contract_id', 'ledger', 'event_identity'],
+};
+
 export class IndexerDb {
   #client: SupabaseClient;
 
@@ -488,12 +505,22 @@ export class IndexerDb {
           .select(columns)
           .in('contract_id', chunk);
 
-        const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
-          ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(
+        let orderedQuery = selectQuery;
+        const orderCols = TABLE_TIEBREAKERS[table] ?? ['contract_id'];
+        for (const col of orderCols) {
+          if (typeof (orderedQuery as { order?: unknown }).order === 'function') {
+            orderedQuery = (orderedQuery as {
+              order: (col: string, opts?: { ascending: boolean }) => typeof orderedQuery;
+            }).order(col, { ascending: true });
+          }
+        }
+
+        const pagedQuery = typeof (orderedQuery as { range?: unknown }).range === 'function'
+          ? (orderedQuery as { range: (from: number, to: number) => typeof orderedQuery }).range(
             from,
             to,
           )
-          : selectQuery;
+          : orderedQuery;
 
         const { data, error } = await pagedQuery;
 
@@ -506,7 +533,7 @@ export class IndexerDb {
           allRows.push(row);
         }
 
-        if (typeof (selectQuery as { range?: unknown }).range !== 'function') {
+        if (typeof (orderedQuery as { range?: unknown }).range !== 'function') {
           if (rows.length >= pageSize) {
             throw new Error(
               `Failed to read ${table}: returned ${rows.length} rows at server cap without pagination support`,
