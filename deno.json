@@ -7,7 +7,7 @@
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",
     "lint": "deno lint",
-    "test": "deno test --allow-env --allow-net=deno.land,jsr.io,registry.npmjs.org tests/",
+    "test": "deno test --allow-env --allow-read --allow-net=deno.land,jsr.io,registry.npmjs.org tests/",
     "test:coverage": "deno test --allow-env --coverage=coverage tests/ && deno coverage coverage"
   },
   "fmt": {
@@ -16,7 +16,7 @@
     "indentWidth": 2,
     "semiColons": true,
     "singleQuote": true,
-    "exclude": ["coverage", "supabase/migrations", "assets"]
+    "exclude": ["coverage", "supabase/migrations", "assets", "public/fonts/*.svg"]
   },
   "lint": {
     "rules": {
