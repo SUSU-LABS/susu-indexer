@@ -26,6 +26,7 @@ import {
   classifyEmptyRange,
   computeLedgerRange,
   ledgerLag,
+  startLedgerAheadOfCheckpoint,
 } from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
@@ -169,10 +170,29 @@ export async function handleRequest(
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
     const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
 
+    const startLedger = checkpoint?.startLedger ?? config.startLedger;
+    if (
+      startLedgerAheadOfCheckpoint({
+        lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
+        startLedger,
+      })
+    ) {
+      // The configured start ledger moved past the checkpoint. Following it
+      // would skip every ledger in between with no trace, so it is ignored and
+      // the run resumes from the checkpoint — but an operator who raised it
+      // expecting a rescan needs to be told, and pointed at the documented
+      // rebuild (which resets last_processed_ledger) instead.
+      logger.warn('Start ledger is ahead of the checkpoint; resuming from the checkpoint', {
+        reason: 'start_ledger_ahead_of_checkpoint',
+        startLedger,
+        checkpoint: checkpoint?.lastProcessedLedger,
+      });
+    }
+
     const range = computeLedgerRange({
       lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
       latestLedger,
-      startLedger: checkpoint?.startLedger ?? config.startLedger,
+      startLedger,
       maxRange: config.maxLedgersPerRun,
     });
 

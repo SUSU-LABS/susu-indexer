@@ -37,7 +37,12 @@ export type LedgerRange = {
  *
  * On a first run (`lastProcessedLedger === null`) indexing begins at
  * `startLedger`, which is the ledger the contracts were deployed at. On later
- * runs it resumes immediately after the checkpoint, so no ledger is skipped.
+ * runs it resumes immediately after the checkpoint — `startLedger` is not
+ * consulted, because raising it (via the environment or the checkpoint row)
+ * while a checkpoint exists would silently skip every ledger in between,
+ * carving a permanent invisible gap. A documented rebuild resets
+ * `lastProcessedLedger` to `startLedger - 1`, which is what makes a new start
+ * ledger take effect.
  *
  * Returns `null` when the indexer is already caught up to the chain head.
  * Throws on invalid input rather than guessing — a bad range could skip ledgers.
@@ -65,14 +70,28 @@ export function computeLedgerRange(params: {
     }
   }
 
-  const from = lastProcessedLedger === null
-    ? startLedger
-    : Math.max(lastProcessedLedger + 1, startLedger);
+  const from = lastProcessedLedger === null ? startLedger : lastProcessedLedger + 1;
 
   if (from > latestLedger) return null;
 
   const to = Math.min(latestLedger, from + maxRange - 1);
   return { from, to, truncated: to < latestLedger };
+}
+
+/**
+ * Whether a configured start ledger is being raised above an existing
+ * checkpoint — the misconfiguration that used to skip ledgers silently.
+ *
+ * True only when a checkpoint exists and the start ledger points past
+ * `lastProcessedLedger + 1`, i.e. following it would leave a gap. Callers log
+ * this; `computeLedgerRange` ignores the raised value either way.
+ */
+export function startLedgerAheadOfCheckpoint(params: {
+  lastProcessedLedger: number | null;
+  startLedger: number;
+}): boolean {
+  if (params.lastProcessedLedger === null) return false;
+  return params.startLedger > params.lastProcessedLedger + 1;
 }
 
 /**

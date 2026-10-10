@@ -564,6 +564,35 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
   }
 });
 
+Deno.test('handleRequest ignores a checkpoint start_ledger raised past the checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps(groupEvents, SCENARIO_HEAD);
+    // The checkpoint row's start_ledger was raised past the checkpoint itself —
+    // the misconfiguration that used to compute from = max(checkpoint + 1,
+    // startLedger) and silently skip every ledger in between, forever.
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_FROM - 1,
+      startLedger: SCENARIO_HEAD + 5000,
+    });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    // Not skipped: the run resumed at the checkpoint and worked the range.
+    assertEquals(body.status, 'ok');
+    assertEquals(body.ledgerFrom, SCENARIO_FROM);
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
 Deno.test('handleRequest reports a tip below the checkpoint as tip_regression', async () => {
   const restoreEnv = withTestEnv();
   try {
