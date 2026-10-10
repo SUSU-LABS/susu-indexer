@@ -75,11 +75,15 @@ class StubSupabaseClient {
    * calls. Returns no rows: the orchestration tests assert on indexed events,
    * checkpoints and discovered groups, not on the reconciled aggregates (the
    * equivalence test in `derive_group_state_test.ts` pins the SQL itself).
+   * Calls are recorded so tests can assert the RPC was (not) hit.
    */
+  readonly rpcCalls: { fn: string; params: Record<string, unknown> }[] = [];
+
   rpc(
-    _fn: string,
-    _params: Record<string, unknown>,
+    fn: string,
+    params: Record<string, unknown>,
   ): Promise<{ data: Record<string, unknown>[]; error: null }> {
+    this.rpcCalls.push({ fn, params });
     return Promise.resolve({ data: [], error: null });
   }
 
@@ -577,6 +581,9 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
       stub.rows('indexer_checkpoints')[0]?.['last_seen_latest_ledger'],
       SCENARIO_HEAD,
     );
+    // The skip path returns before reconcileGroups, so the derive_group_state
+    // RPC must not have been hit either.
+    assertEquals(stub.rpcCalls.length, 0);
     assertEquals(rpc.requests, []);
   } finally {
     restoreEnv();
