@@ -1,5 +1,5 @@
 {
-  "note": "Raw Soroban events captured from Stellar Testnet. Used as decode fixtures so the decoder is tested against the bytes the network actually emits, not against bytes we assumed it emits.",
+  "note": "Seven original fixtures are inherited from upstream. The three config-event samples are synthetic decoder inputs, NOT verified Testnet captures; see provenance on each sample. Real capture provenance is still required for issue #48.",
   "factory_contract_id": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
   "group_contract_id": "CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O",
   "factory_events": [
@@ -110,6 +110,58 @@
         "AAAAEgAAAAHvck/cN+n41D3IIIL1Vi+5N30NcwHW8HWFB2AV8G1x0Q=="
       ],
       "value": "AAAAEQAAAAEAAAAEAAAADwAAABNjb250cmlidXRpb25fYW1vdW50AAAAAAoAAAAAAAAAAAAAAAAF9eEAAAAADwAAAAhncm91cF9pZAAAAAMAAAALAAAADwAAAA9tZW1iZXJfY2FwYWNpdHkAAAAAAwAAAAMAAAAPAAAABXRva2VuAAAAAAAAEgAAAAHV5Afvjs5WuWfkd/cNdZtwKs9NvySA2VC61JadKabeSw=="
+    },
+    {
+      "type": "contract",
+      "ledger": 4629056,
+      "ledgerClosedAt": "2026-09-11T23:21:07Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019881644131377152-0000000000",
+      "operationIndex": 0,
+      "transactionIndex": 2,
+      "txHash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAAAtmZWVfdXBkYXRlZAA="
+      ],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAAMAAAAP",
+      "provenance": "synthetic; not an on-chain transaction; real Testnet capture pending"
+    },
+    {
+      "type": "contract",
+      "ledger": 4629057,
+      "ledgerClosedAt": "2026-09-11T23:21:12Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019881648426344448-0000000000",
+      "operationIndex": 0,
+      "transactionIndex": 3,
+      "txHash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAABB0cmVhc3VyeV91cGRhdGVk",
+        "AAAAEgAAAAAAAAAAlUFpUf3CXYyhKvn9OZqu9uuXyPtXvNrSoqO2/BYIsFg="
+      ],
+      "value": "AAAAEQAAAAEAAAAA",
+      "provenance": "synthetic; not an on-chain transaction; real Testnet capture pending"
+    },
+    {
+      "type": "contract",
+      "ledger": 4629058,
+      "ledgerClosedAt": "2026-09-11T23:21:17Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019881652721311744-0000000000",
+      "operationIndex": 0,
+      "transactionIndex": 4,
+      "txHash": "3333333333333333333333333333333333333333333333333333333333333333",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAAA1wYXVzZV91cGRhdGVkAAAA"
+      ],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAB",
+      "provenance": "synthetic; not an on-chain transaction; real Testnet capture pending"
     }
   ],
   "group_events": [

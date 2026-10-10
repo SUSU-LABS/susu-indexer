@@ -1,9 +1,8 @@
 /**
- * Captured Testnet events, in the shape the RPC client produces.
+ * Decoder fixtures in the shape the RPC client produces.
  *
- * Shared by the decoder and ingest tests. Both are asserted against bytes the
- * contracts actually emitted rather than bytes we assumed they emit, and both
- * need the same view of them, so the conversion lives here once.
+ * Shared by decoder and ingest tests. The config-event additions are explicitly
+ * synthetic; their shape has not yet been confirmed against a Testnet capture.
  */
 
 import { xdr } from '@stellar/stellar-sdk';
@@ -11,7 +10,7 @@ import { decodeChainEvent, type DecodedChainEvent } from '../supabase/functions/
 import type { RpcEvent } from '../supabase/functions/_shared/stellar.ts';
 import fixture from './fixtures/chain_events.json' with { type: 'json' };
 
-/** A captured event, as it appears in the fixture. */
+/** A raw sample, as it appears in the fixture. */
 export type RawEvent = {
   ledger: number;
   txHash: string;
