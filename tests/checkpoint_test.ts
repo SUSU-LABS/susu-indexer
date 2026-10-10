@@ -177,3 +177,61 @@ Deno.test('ledgerLag reports the distance from the chain tip', () => {
 Deno.test('ledgerLag never reports a negative lag', () => {
   assertEquals(ledgerLag(checkpoint(110), 100), 0);
 });
+
+// ---------------------------------------------------------------------------
+// Raised start ledger with an existing checkpoint
+// ---------------------------------------------------------------------------
+
+Deno.test('a raised start ledger never skips ledgers past a checkpoint', () => {
+  const ignored: Array<{ startLedger: number; resumedFrom: number }> = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: 1099,
+    latestLedger: 5000,
+    startLedger: 2000,
+    maxRange: 100,
+    onStartLedgerIgnored: (detail) => ignored.push(detail),
+  });
+  // Resumes immediately after the checkpoint instead of jumping to 2000.
+  assertEquals(range, { from: 1100, to: 1199, truncated: true });
+  // The caller is told loudly that the configured start ledger was ignored.
+  assertEquals(ignored, [{ startLedger: 2000, resumedFrom: 1100 }]);
+});
+
+Deno.test('a start ledger at or below the checkpoint resume point is not flagged', () => {
+  const ignored: Array<unknown> = [];
+  // The documented rebuild procedure sets last_processed_ledger to
+  // start_ledger - 1, so startLedger equals exactly lastProcessedLedger + 1.
+  const rebuild = computeLedgerRange({
+    lastProcessedLedger: 1999,
+    latestLedger: 5000,
+    startLedger: 2000,
+    maxRange: 100,
+    onStartLedgerIgnored: (detail) => ignored.push(detail),
+  });
+  assertEquals(rebuild, { from: 2000, to: 2099, truncated: true });
+  assertEquals(ignored, []);
+
+  // A start ledger below the checkpoint is equally unremarkable.
+  const normal = computeLedgerRange({
+    lastProcessedLedger: 1099,
+    latestLedger: 5000,
+    startLedger: 1000,
+    maxRange: 100,
+    onStartLedgerIgnored: (detail) => ignored.push(detail),
+  });
+  assertEquals(normal, { from: 1100, to: 1199, truncated: true });
+  assertEquals(ignored, []);
+});
+
+Deno.test('a first run still honours the configured start ledger', () => {
+  const ignored: Array<unknown> = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: null,
+    latestLedger: 5000,
+    startLedger: 2000,
+    maxRange: 100,
+    onStartLedgerIgnored: (detail) => ignored.push(detail),
+  });
+  assertEquals(range, { from: 2000, to: 2099, truncated: true });
+  assertEquals(ignored, []);
+});
