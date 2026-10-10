@@ -38,7 +38,7 @@ jobs:
         run: deno check supabase/functions/indexer/index.ts
 
       - name: Test
-        run: deno test --allow-env tests/
+        run: deno test --frozen --allow-env --allow-read tests/
 
       - name: Secret scan (gitleaks)
         run: |

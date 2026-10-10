@@ -61,66 +61,28 @@ export async function withRetry<T>(
   throw lastError;
 }
 
-/**
- * Classifies an error as worth retrying.
- *
- * Retrying a deterministic failure — a validation error, a Postgres
- * constraint violation, a JSON-RPC `-32600` — cannot make it succeed: it
- * burns the attempt budget and ~4s of backoff, spends RPC quota, and buries
- * the real cause under a stack of identical failures. Only errors whose next
- * occurrence might differ are retried:
- *
- * - network-level failures (fetch could not reach the peer at all);
- * - HTTP 408 / 429 / 5xx, where the server asked for patience or failed
- *   transiently;
- * - JSON-RPC *server* error codes (-32000..-32099), the range the spec
- *   reserves for server-side conditions — as opposed to -326xx
- *   (parse/invalid/method-not-found) and -327xx (parse error), which are
- *   the request's own fault and will fail identically on every attempt;
- * - database messages that read as transport or availability problems
- *   (connection reset, timeout, "terminating connection", "too many
- *   clients"), as opposed to constraint/integrity violations (duplicate
- *   key, foreign key, check constraint) which are deterministic.
- *
- * Anything unrecognised — including non-Error rejections — is retried: an
- * unknown transport failure should not be classified as permanent by
- * accident. Callers that know better (a deterministic client bug) can pass a
- * narrower `isRetryable` to {@linkcode withRetry}.
- */
+/** Retry transport/availability failures, never unknown application failures. */
 export function isRetryableError(error: unknown): boolean {
-  if (error instanceof Error) {
-    if (error.name === 'TypeError') {
-      // fetch-level failures: "error sending request for url", "dns error",
-      // "connection refused", "network connection was lost".
-      return true;
-    }
-
-    const withStatus = error as Error & { status?: unknown };
-    if (typeof withStatus.status === 'number') {
-      return (
-        withStatus.status === 408 ||
-        withStatus.status === 429 ||
-        withStatus.status >= 500
-      );
-    }
-
-    const rpcCode = /RPC error (-?\d+)/.exec(error.message)?.[1];
-    if (rpcCode !== undefined) {
-      const code = Number(rpcCode);
-      return code <= -32000 && code >= -32099;
-    }
-
-    if (
-      /connection (refused|reset|terminated|closed)|econnreset|etimedout|econnrefused|socket hang up|network connection was lost|too many clients|terminating connection due to|still in use|could not connect/i
-        .test(error.message)
-    ) {
-      return true;
-    }
-
-    // Constraint violations, bad input, unrecognised application errors:
-    // deterministic. They will fail the same way on every attempt.
-    return false;
+  if (typeof error !== 'object' || error === null) return false;
+  const value = error as { name?: unknown; message?: unknown; status?: unknown; code?: unknown };
+  const code = typeof value.code === 'string' ? value.code : '';
+  // PostgreSQL integrity and input errors are deterministic, even if their
+  // messages happen to contain words such as "timeout".
+  if (/^(22|23)/.test(code)) return false;
+  if (/^08/.test(code) || ['40001', '40P01', '53300', '57P01', '57P02', '57P03'].includes(code)) {
+    return true;
   }
-
-  return true;
+  if (typeof value.status === 'number') {
+    return value.status === 408 || value.status === 429 ||
+      (value.status >= 500 && value.status < 600);
+  }
+  if (value.name === 'TimeoutError') return true;
+  const message = typeof value.message === 'string' ? value.message : '';
+  const rpcCode = /RPC error (-?\d+)/.exec(message)?.[1];
+  if (rpcCode !== undefined) {
+    const code = Number(rpcCode);
+    return code <= -32000 && code >= -32099;
+  }
+  return /connection (refused|reset|terminated|closed)|econnreset|etimedout|econnrefused|socket hang up|network connection was lost|too many clients|terminating connection due to|could not connect|fetch failed|failed to fetch|error sending request|dns error|timed out|timeout expired|serialization failure|deadlock detected/i
+    .test(message);
 }

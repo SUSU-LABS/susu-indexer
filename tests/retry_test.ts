@@ -1,3 +1,5 @@
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { IndexerDb } from '../supabase/functions/_shared/db.ts';
 import { assertEquals, assertRejects } from '@std/assert';
 import { backoffDelay, isRetryableError, withRetry } from '../supabase/functions/_shared/retry.ts';
 
@@ -134,7 +136,7 @@ Deno.test('isRetryableError retries network, 5xx, 429 and server RPC codes', () 
     isRetryableError(new Error('terminating connection due to administrator command')),
     true,
   );
-  assertEquals(isRetryableError('a non-error rejection'), true);
+  assertEquals(isRetryableError('a non-error rejection'), false);
 });
 
 Deno.test('isRetryableError does not retry deterministic failures', () => {
@@ -215,4 +217,67 @@ Deno.test('withRetry uses isRetryableError to retry transient 503 error', async 
   assertEquals(result, 'recovered');
   assertEquals(calls, 3);
   assertEquals(delays, [250, 500]);
+});
+
+Deno.test('retry classifier distinguishes transport failures from programming errors', async () => {
+  const cases: [unknown, number][] = [
+    [new TypeError('Cannot read properties of undefined'), 1],
+    [{ code: '23505', message: 'duplicate key' }, 1],
+    [{ code: '40001', message: 'serialization failure' }, 3],
+    [new DOMException('request deadline exceeded', 'TimeoutError'), 3],
+    [new Error('RPC request failed: fetch failed'), 3],
+  ];
+  for (const [error, expected] of cases) {
+    let calls = 0;
+    try {
+      await withRetry(() => {
+        calls++;
+        return Promise.reject(error);
+      }, {
+        attempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        sleep: () => Promise.resolve(),
+        isRetryable: isRetryableError,
+      });
+    } catch (actual) {
+      assertEquals(actual, error);
+    }
+    assertEquals(calls, expected);
+  }
+});
+
+Deno.test('real database wrapper preserves SQLSTATE for retry decisions', async () => {
+  for (const [code, attempts] of [['23505', 1], ['40001', 3]] as const) {
+    let calls = 0;
+    const client = {
+      from: () => ({
+        upsert: () => {
+          calls++;
+          return Promise.resolve({ error: { code, message: 'database rejected write' } });
+        },
+      }),
+    } as unknown as SupabaseClient;
+    const db = new IndexerDb('https://example.test', 'test-key', client);
+    await assertRejects(() =>
+      withRetry(() =>
+        db.upsertEvents([{
+          event_identity: 'test-event',
+          ledger: 1,
+          tx_hash: 'a'.repeat(64),
+          tx_index: 0,
+          event_index: 0,
+          contract_id: 'C',
+          topic: [],
+          value: '',
+        }]), {
+        attempts: 3,
+        baseDelayMs: 0,
+        maxDelayMs: 0,
+        isRetryable: isRetryableError,
+        sleep: () => Promise.resolve(),
+      })
+    );
+    assertEquals(calls, attempts);
+  }
 });
