@@ -97,7 +97,7 @@ export function classifyEmptyRange(params: {
   // With a checkpoint, regression means the tip cannot even reach the last
   // ledger already processed. Without one, the floor is the deployment ledger:
   // a tip below it cannot be the network the contracts live on.
-  const reached = params.lastProcessedLedger ?? params.startLedger - 1;
+  const reached = params.lastProcessedLedger ?? params.startLedger;
   if (params.latestLedger < reached) {
     return { kind: 'tip-regression', behindBy: reached - params.latestLedger };
   }

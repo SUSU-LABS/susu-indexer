@@ -126,15 +126,15 @@ Deno.test('a first-run tip below the deployment ledger is a tip regression', () 
       latestLedger: 400,
       startLedger: 1000,
     }),
-    { kind: 'tip-regression', behindBy: 599 },
+    { kind: 'tip-regression', behindBy: 600 },
   );
 });
 
-Deno.test('a first-run tip at or above the deployment ledger is caught up', () => {
+Deno.test('a first-run tip at the deployment ledger is not regressed', () => {
   assertEquals(
     classifyEmptyRange({
       lastProcessedLedger: null,
-      latestLedger: 999,
+      latestLedger: 1000,
       startLedger: 1000,
     }),
     { kind: 'caught-up' },
@@ -227,4 +227,11 @@ Deno.test('ledgerLag reports the distance from the chain tip', () => {
 
 Deno.test('ledgerLag never reports a negative lag', () => {
   assertEquals(ledgerLag(checkpoint(110), 100), 0);
+});
+
+Deno.test('tip immediately below deployment ledger is not caught up', () => {
+  assertEquals(
+    classifyEmptyRange({ lastProcessedLedger: null, latestLedger: 999, startLedger: 1000 }),
+    { kind: 'tip-regression', behindBy: 1 },
+  );
 });
