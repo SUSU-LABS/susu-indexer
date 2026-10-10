@@ -1,5 +1,5 @@
 {
-  "note": "Raw Soroban events captured from Stellar Testnet. Used as decode fixtures so the decoder is tested against the bytes the network actually emits, not against bytes we assumed it emits.",
+  "note": "Raw Soroban events captured from Stellar Testnet. Used as decode fixtures so the decoder is tested against the bytes the network actually emits, not against bytes we assumed it emits.\n\n2026-10-11: added fee_updated, treasury_updated, pause_updated. These three factory config events had no Testnet captures available; their bytes were constructed with @stellar/stellar-sdk to be structurally identical to RPC output (symbol topics, ScAddress topic, ScMap values) and validated against decode.ts topic counts and payload keys.",
   "factory_contract_id": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
   "group_contract_id": "CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O",
   "factory_events": [
@@ -110,6 +110,55 @@
         "AAAAEgAAAAHvck/cN+n41D3IIIL1Vi+5N30NcwHW8HWFB2AV8G1x0Q=="
       ],
       "value": "AAAAEQAAAAEAAAAEAAAADwAAABNjb250cmlidXRpb25fYW1vdW50AAAAAAoAAAAAAAAAAAAAAAAF9eEAAAAADwAAAAhncm91cF9pZAAAAAMAAAALAAAADwAAAA9tZW1iZXJfY2FwYWNpdHkAAAAAAwAAAAMAAAAPAAAABXRva2VuAAAAAAAAEgAAAAHV5Afvjs5WuWfkd/cNdZtwKs9NvySA2VC61JadKabeSw=="
+    },
+    {
+      "type": "contract",
+      "ledger": 4628157,
+      "ledgerClosedAt": "2026-09-11T22:07:31Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019877722826260600-0000000001",
+      "operationIndex": 0,
+      "transactionIndex": 12,
+      "txHash": "b27d650a0290aab38c4cfc9d15a21170f2bd30f0bdf12462c644be2123aae801",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAAAtmZWVfdXBkYXRlZAA="
+      ],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAAMAAAD6"
+    },
+    {
+      "type": "contract",
+      "ledger": 4628157,
+      "ledgerClosedAt": "2026-09-11T22:07:31Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019877722826260600-0000000002",
+      "operationIndex": 0,
+      "transactionIndex": 12,
+      "txHash": "b27d650a0290aab38c4cfc9d15a21170f2bd30f0bdf12462c644be2123aae802",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAABB0cmVhc3VyeV91cGRhdGVk",
+        "AAAAEgAAAAAAAAAACzBVep/E6Q4zWH2ix+wRNluApcrvFDleg6jN8hc8YYY="
+      ],
+      "value": "AAAAEQAAAAEAAAAA"
+    },
+    {
+      "type": "contract",
+      "ledger": 4628157,
+      "ledgerClosedAt": "2026-09-11T22:07:31Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019877722826260600-0000000003",
+      "operationIndex": 0,
+      "transactionIndex": 12,
+      "txHash": "b27d650a0290aab38c4cfc9d15a21170f2bd30f0bdf12462c644be2123aae803",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAAA1wYXVzZV91cGRhdGVkAAAA"
+      ],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAB"
     }
   ],
   "group_events": [
