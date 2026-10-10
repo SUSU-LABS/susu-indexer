@@ -60,6 +60,15 @@ export type RejectedEventRow = {
   reason: string;
 };
 
+/**
+ * Maximum number of rows sent in a single PostgREST upsert call.
+ *
+ * A busy ledger range can produce tens of thousands of rows, exceeding
+ * request-body and statement limits. Sequential chunking bounds each request;
+ * a failure in any batch fails the run so the checkpoint is left untouched.
+ */
+export const UPSERT_BATCH_SIZE = 1000;
+
 export class IndexerDb {
   #client: SupabaseClient;
 
@@ -108,14 +117,7 @@ export class IndexerDb {
    */
   async upsertEvents(rows: readonly IndexedEventRow[]): Promise<void> {
     if (rows.length === 0) return;
-
-    const { error } = await this.#client
-      .from('indexed_events')
-      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
-
-    if (error) {
-      throw new Error(`Failed to upsert indexed events: ${error.message}`);
-    }
+    await this.#upsertInBatches('indexed_events', rows, 'event_identity');
   }
 
   /**
@@ -205,14 +207,7 @@ export class IndexerDb {
    */
   async upsertGroups(rows: readonly NewGroup[]): Promise<void> {
     if (rows.length === 0) return;
-
-    const { error } = await this.#client
-      .from('groups')
-      .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
-
-    if (error) {
-      throw new Error(`Failed to upsert groups: ${error.message}`);
-    }
+    await this.#upsertInBatches('groups', rows, 'contract_id');
   }
 
   /**
@@ -240,13 +235,36 @@ export class IndexerDb {
     onConflict: string,
   ): Promise<void> {
     if (rows.length === 0) return;
+    await this.#upsertInBatches(table, rows, onConflict);
+  }
 
-    const { error } = await this.#client
-      .from(table)
-      .upsert([...rows], { onConflict, ignoreDuplicates: true });
+  /**
+   * Upserts rows in bounded sequential batches.
+   *
+   * Sequential, not concurrent: the indexer already parallelizes reads, and
+   * fanning out writes would multiply DB pressure at exactly the moment a
+   * busy range is heaviest. A batch failure throws, so the run fails and the
+   * checkpoint is left untouched — partial progress is safe to replay because
+   * every write ignores duplicates.
+   */
+  async #upsertInBatches(
+    table: string,
+    rows: readonly object[],
+    onConflict: string,
+  ): Promise<void> {
+    for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
+      const batch = rows.slice(i, i + UPSERT_BATCH_SIZE);
+      const { error } = await this.#client
+        .from(table)
+        .upsert([...batch], { onConflict, ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to record ${table}: ${error.message}`);
+      if (error) {
+        throw new Error(
+          `Failed to upsert ${table} (batch ${
+            Math.floor(i / UPSERT_BATCH_SIZE) + 1
+          }): ${error.message}`,
+        );
+      }
     }
   }
 
