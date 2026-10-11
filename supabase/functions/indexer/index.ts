@@ -166,6 +166,8 @@ export async function handleRequest(
       latestLedger,
       startLedger: checkpoint?.startLedger ?? config.startLedger,
       maxRange: config.maxLedgersPerRun,
+      onWarning: (message) =>
+        logger.warn('Start ledger skipped over an existing checkpoint', { reason: message }),
     });
 
     if (range === null) {
