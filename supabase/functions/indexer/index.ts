@@ -55,7 +55,7 @@ type RequestDependencies = {
 };
 
 type RunSummary = {
-  status: 'ok' | 'skipped' | 'failed';
+  status: 'ok' | 'skipped' | 'failed' | 'tip_regression';
   correlationId: string;
   ledgerFrom?: number;
   ledgerTo?: number;
@@ -171,6 +171,25 @@ export async function handleRequest(
     });
 
     if (range === null) {
+      // A tip below where this run would resume is not "caught up" — the
+      // provider is lagging or pointed at the wrong network, and it must not
+      // pass for an idle, healthy indexer.
+      const resumeAfter = checkpoint?.lastProcessedLedger ?? config.startLedger;
+      if (latestLedger < resumeAfter) {
+        logger.warn('Chain tip regressed behind the indexer position', {
+          latestLedger,
+          resumeAfter,
+        });
+        await withRetry(() => db.recordLatestLedger(latestLedger), RETRY);
+        return jsonResponse(
+          {
+            status: 'tip_regression',
+            correlationId,
+            checkpoint: checkpoint?.lastProcessedLedger,
+          },
+          200,
+        );
+      }
       logger.info('Nothing to index', { latestLedger });
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the
