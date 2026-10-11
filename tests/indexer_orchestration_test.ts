@@ -10,6 +10,7 @@
  * advance the checkpoint.
  */
 
+// CI retrigger: no-op
 import { assert, assertEquals, assertRejects } from '@std/assert';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { IndexerDb } from '../supabase/functions/_shared/db.ts';
