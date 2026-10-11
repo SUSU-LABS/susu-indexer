@@ -74,6 +74,10 @@ declare
   v_notified integer := 0;
   v_webhook text;
   v_alert record;
+  v_request_id bigint;
+  v_status integer;
+  v_delivered boolean := false;
+  v_try integer;
 begin
   -- The conditions that are true right now. A temp table rather than four
   -- repeated queries, because the same set is used to open alerts and then to
@@ -223,7 +227,7 @@ begin
           and a.notified_at is null
         order by a.opened_at
       loop
-        perform net.http_post(
+        v_request_id := net.http_post(
           url := v_webhook,
           headers := jsonb_build_object('content-type', 'application/json'),
           body := jsonb_build_object(
@@ -239,8 +243,31 @@ begin
           timeout_milliseconds := 10000
         );
 
-        update public.indexer_alerts set notified_at = v_now where id = v_alert.id;
-        v_notified := v_notified + 1;
+        -- `net.http_post` only queues the request: the id it returns is not a
+        -- delivery confirmation. Read the response back before marking the
+        -- alert delivered, so a 404, a 500 or a timeout leaves notified_at
+        -- null and the next pass tries again. Delivery is at-least-once: a
+        -- response that lands just after the read below yields a duplicate,
+        -- which is an annoyance, while a missed alert is a lost window.
+        v_delivered := false;
+        v_try := 0;
+        while v_try < 40 loop
+          select r.status_code into v_status
+          from net._http_response r
+          where r.id = v_request_id
+          limit 1;
+          if found then
+            v_delivered := v_status between 200 and 299;
+            exit;
+          end if;
+          v_try := v_try + 1;
+          perform pg_sleep(0.25);
+        end loop;
+
+        if v_delivered then
+          update public.indexer_alerts set notified_at = v_now where id = v_alert.id;
+          v_notified := v_notified + 1;
+        end if;
       end loop;
     end if;
   end if;
