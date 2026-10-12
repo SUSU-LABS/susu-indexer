@@ -20,7 +20,7 @@
  * problem, which is what it is for.
  */
 
-import { withRetry } from './retry.ts';
+import { defaultIsRetryable, withRetry } from './retry.ts';
 import type { EventPageStart, GetEventsResult, RpcEvent } from './stellar.ts';
 
 /** Events requested per page. */
@@ -47,8 +47,18 @@ export const MAX_CONTRACT_IDS_PER_FILTER = 5;
  */
 export const MAX_PAGES = 1_000;
 
-/** Bounded retry policy for transient RPC failures during a scan. */
-const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
+/**
+ * Bounded retry policy for transient RPC failures during a scan.
+ *
+ * Deterministic failures (4xx validation, JSON-RPC -32600/-32601/-32602) are
+ * not retried — see defaultIsRetryable.
+ */
+const RETRY = {
+  attempts: 4,
+  baseDelayMs: 250,
+  maxDelayMs: 4_000,
+  isRetryable: defaultIsRetryable,
+} as const;
 
 /**
  * The slice of the RPC client a scan needs.

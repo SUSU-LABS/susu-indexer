@@ -30,13 +30,23 @@ import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_sha
 import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
-import { withRetry } from '../_shared/retry.ts';
+import { defaultIsRetryable, withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
-/** Bounded retry policy for transient RPC and database failures. */
-const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
+/**
+ * Bounded retry policy for transient RPC and database failures.
+ *
+ * Deterministic failures (4xx validation, constraint violations) are not
+ * retried — see defaultIsRetryable.
+ */
+const RETRY = {
+  attempts: 4,
+  baseDelayMs: 250,
+  maxDelayMs: 4_000,
+  isRetryable: defaultIsRetryable,
+} as const;
 
 /**
  * The slice of the RPC client the request handler needs: what the scan needs,

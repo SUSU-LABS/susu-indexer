@@ -11,11 +11,59 @@ export type RetryOptions = {
   attempts: number;
   baseDelayMs: number;
   maxDelayMs: number;
-  /** Returns true when the error is worth retrying. Defaults to always retry. */
+  /** Returns true when the error is worth retrying. Defaults to {@link defaultIsRetryable}. */
   isRetryable?: (error: unknown) => boolean;
   /** Injected for tests; defaults to a real sleep. */
   sleep?: (ms: number) => Promise<void>;
 };
+
+/**
+ * Default retry classifier: retry transient failures, not deterministic ones.
+ *
+ * Retried: network/transport errors, timeouts, HTTP 408/429/5xx, and anything
+ * unrecognized (fail-open — a new transient failure mode should still get its
+ * attempts rather than surfacing immediately).
+ *
+ * Not retried: HTTP 4xx validation errors, deterministic JSON-RPC errors
+ * (-32600 invalid request, -32601 method not found, -32602 invalid params),
+ * and Postgres constraint violations (the same payload will fail the same way
+ * on every attempt).
+ */
+export function defaultIsRetryable(error: unknown): boolean {
+  // Timeouts are always worth another attempt. Deno's AbortSignal.timeout()
+  // surfaces as TimeoutError; older runtimes may use AbortError.
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+
+  // Timeout by message (e.g. RpcError('... timed out ...') from stellar.ts).
+  if (/timed out/i.test(message)) return true;
+
+  // RpcError carries the HTTP status when the failure came from the transport.
+  // 408/429/5xx are transient; other 4xx are validation errors that will not
+  // change on retry.
+  const status = (error as { status?: unknown }).status;
+  if (typeof status === 'number' && Number.isInteger(status)) {
+    if (status === 408 || status === 429 || (status >= 500 && status <= 599)) return true;
+    if (status >= 400 && status < 500) return false;
+  }
+
+  // Deterministic JSON-RPC errors. -32600 (invalid request, e.g. a startLedger
+  // outside the retention window), -32601 (method not found) and -32602
+  // (invalid params) describe the request, not the network.
+  if (/RPC error -3260[012]:/.test(message)) return false;
+
+  // Postgres constraint violations: the same row will violate the same
+  // constraint on every attempt. Matches the messages PostgREST surfaces,
+  // which db.ts embeds verbatim in its wrapped errors.
+  if (/violates (unique|foreign key|not-null|check) constraint/i.test(message)) return false;
+  if (/duplicate key value/i.test(message)) return false;
+
+  // Network/transport failures and anything unrecognized: retry.
+  return true;
+}
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -34,7 +82,13 @@ export async function withRetry<T>(
   operation: (attempt: number) => Promise<T>,
   options: RetryOptions,
 ): Promise<T> {
-  const { attempts, baseDelayMs, maxDelayMs, isRetryable, sleep = defaultSleep } = options;
+  const {
+    attempts,
+    baseDelayMs,
+    maxDelayMs,
+    isRetryable = defaultIsRetryable,
+    sleep = defaultSleep,
+  } = options;
 
   if (!Number.isInteger(attempts) || attempts < 1) {
     throw new Error('withRetry requires attempts >= 1');
@@ -48,8 +102,7 @@ export async function withRetry<T>(
     } catch (error) {
       lastError = error;
 
-      const retryable = isRetryable === undefined ? true : isRetryable(error);
-      if (!retryable || attempt === attempts) {
+      if (!isRetryable(error) || attempt === attempts) {
         throw error;
       }
 
