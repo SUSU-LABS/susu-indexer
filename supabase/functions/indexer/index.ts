@@ -30,13 +30,24 @@ import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_sha
 import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
-import { withRetry } from '../_shared/retry.ts';
+import { isRetryableError, withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
 import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
-/** Bounded retry policy for transient RPC and database failures. */
-const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
+/**
+ * Bounded retry policy for transient RPC and database failures.
+ *
+ * Only blips are worth a second attempt. A rejected parameter or a constraint
+ * violation reproduces identically on every try, so the predicate keeps the
+ * whole budget for the failures that can actually heal between attempts.
+ */
+const RETRY = {
+  attempts: 4,
+  baseDelayMs: 250,
+  maxDelayMs: 4_000,
+  isRetryable: isRetryableError,
+} as const;
 
 /**
  * The slice of the RPC client the request handler needs: what the scan needs,
