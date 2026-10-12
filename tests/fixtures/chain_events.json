@@ -110,6 +110,58 @@
         "AAAAEgAAAAHvck/cN+n41D3IIIL1Vi+5N30NcwHW8HWFB2AV8G1x0Q=="
       ],
       "value": "AAAAEQAAAAEAAAAEAAAADwAAABNjb250cmlidXRpb25fYW1vdW50AAAAAAoAAAAAAAAAAAAAAAAF9eEAAAAADwAAAAhncm91cF9pZAAAAAMAAAALAAAADwAAAA9tZW1iZXJfY2FwYWNpdHkAAAAAAwAAAAMAAAAPAAAABXRva2VuAAAAAAAAEgAAAAHV5Afvjs5WuWfkd/cNdZtwKs9NvySA2VC61JadKabeSw=="
+    },
+    {
+      "type": "contract",
+      "ledger": 4628300,
+      "ledgerClosedAt": "2026-09-11T22:30:00Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019878300000000001-0000000000",
+      "operationIndex": 0,
+      "transactionIndex": 9,
+      "txHash": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAAAtmZWVfdXBkYXRlZAA="
+      ],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAAMAAAD6",
+      "synthesized_from": "contracts/factory/src/lib.rs FeeUpdated \u2014 no emission on chain within RPC retention; shape asserted through the real decoder"
+    },
+    {
+      "type": "contract",
+      "ledger": 4628301,
+      "ledgerClosedAt": "2026-09-11T22:30:05Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019878300000000002-0000000000",
+      "operationIndex": 0,
+      "transactionIndex": 10,
+      "txHash": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAABB0cmVhc3VyeV91cGRhdGVk",
+        "AAAAEgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      ],
+      "value": "AAAAEQAAAAEAAAAA",
+      "synthesized_from": "contracts/factory/src/lib.rs TreasuryUpdated \u2014 #[topic] treasury Address"
+    },
+    {
+      "type": "contract",
+      "ledger": 4628302,
+      "ledgerClosedAt": "2026-09-11T22:30:10Z",
+      "contractId": "CCC7KAX4V4GJD6FVG6GSYQ4I2D2B3CWEOQMIX6YM4QBGXTA6INCGRUYC",
+      "id": "0019878300000000003-0000000000",
+      "operationIndex": 0,
+      "transactionIndex": 11,
+      "txHash": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAARzdXN1",
+        "AAAADwAAAA1wYXVzZV91cGRhdGVkAAAA"
+      ],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAB",
+      "synthesized_from": "contracts/factory/src/lib.rs PauseUpdated"
     }
   ],
   "group_events": [

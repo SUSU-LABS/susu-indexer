@@ -26,7 +26,7 @@ Deno.test('every captured Testnet event decodes', () => {
 
   assertEquals(rejected, []);
   assertEquals(events.length, allEvents.length);
-  assertEquals(events.length, 26);
+  assertEquals(events.length, 29);
 });
 
 Deno.test('the captured events cover both contracts and their full vocabulary', () => {
@@ -37,10 +37,13 @@ Deno.test('the captured events cover both contracts and their full vocabulary', 
     'completed',
     'contribution',
     'fee',
+    'fee_updated',
     'group_created',
     'join',
+    'pause_updated',
     'payout',
     'start',
+    'treasury_updated',
   ]);
 
   const contracts = [...new Set(events.map((event) => event.contractId))].sort();
@@ -261,5 +264,55 @@ Deno.test('an event with missing or non-true successful flag is rejected', () =>
   assertEquals(result.ok, false);
   if (!result.ok) {
     assertEquals(result.reason.includes('unsuccessful contract call'), true);
+  }
+});
+
+Deno.test('fee_updated decodes its fee basis points', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'fee_updated');
+  if (event?.name !== 'fee_updated') throw new Error('no fee_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.feeBps, 250);
+});
+
+Deno.test('treasury_updated decodes the treasury address from the topic', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'treasury_updated');
+  if (event?.name !== 'treasury_updated') throw new Error('no treasury_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.treasury.startsWith('G'), true);
+});
+
+Deno.test('pause_updated decodes the paused flag', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'pause_updated');
+  if (event?.name !== 'pause_updated') throw new Error('no pause_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.paused, true);
+});
+
+Deno.test('a wrong topic count rejects the config events loudly', () => {
+  const malformed: Array<[string, string[], string]> = [
+    // fee_updated with a stray third topic
+    ['fee_updated', [symbolTopic('susu'), symbolTopic('fee_updated'), symbolTopic('extra')], 'AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAAMAAAD6'],
+    // treasury_updated missing its topic-carried address
+    ['treasury_updated', [symbolTopic('susu'), symbolTopic('treasury_updated')], 'AAAAEQAAAAEAAAAA'],
+    // pause_updated with a stray third topic
+    ['pause_updated', [symbolTopic('susu'), symbolTopic('pause_updated'), symbolTopic('extra')], 'AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAB'],
+  ];
+
+  for (const [name, topic, value] of malformed) {
+    const result = decodeChainEvent({
+      ledger: 1,
+      txHash: 'a'.repeat(64),
+      txIndex: 0,
+      eventIndex: 0,
+      id: 'x-1',
+      contractId: FACTORY_ID,
+      topic,
+      value,
+      successful: true,
+    });
+    assertEquals(result.ok, false, `${name} with a wrong topic count should be rejected`);
   }
 });
