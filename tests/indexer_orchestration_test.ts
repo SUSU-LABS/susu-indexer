@@ -82,6 +82,13 @@ class StubSupabaseClient {
   callsTo(table: string, op: StubCall['op']): StubCall[] {
     return this.calls.filter((c) => c.table === table && c.op === op);
   }
+
+  rpc(
+    _name: string,
+    _params?: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: unknown }> {
+    return Promise.resolve({ data: [], error: null });
+  }
 }
 
 type Filter = { column: string; op: 'eq' | 'in' | 'lt'; value: unknown };
@@ -553,9 +560,11 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // Nothing but the checkpoint read and tip observation happened: no events, no data writes.
     assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
+      stub.calls.filter((call) =>
+        call.op !== 'select' && !(call.table === 'indexer_checkpoints' && call.op === 'update')
+      ),
       [],
     );
     assertEquals(rpc.requests, []);
@@ -610,6 +619,54 @@ Deno.test('IndexerDb.upsertGroupState throws when the group has no row', async (
     Error,
     'no groups row',
   );
+});
+
+Deno.test('IndexerDb.upsertGroupState updates multiple groups in O(1) round trips', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  const G1 = 'C' + '1'.repeat(55);
+  const G2 = 'C' + '2'.repeat(55);
+
+  stub.rows('groups').push(
+    { contract_id: G1, status: 'open' },
+    { contract_id: G2, status: 'open' },
+  );
+
+  const beforeCalls = stub.calls.length;
+
+  await db.upsertGroupState([
+    {
+      contract_id: G1,
+      status: 'active',
+      member_count: 3,
+      current_round: 1,
+      completed_rounds: 0,
+      contributed_total: '100',
+      paid_out_total: '0',
+      fee_total: '0',
+      last_event_ledger: 10,
+    },
+    {
+      contract_id: G2,
+      status: 'completed',
+      member_count: 5,
+      current_round: 5,
+      completed_rounds: 5,
+      contributed_total: '500',
+      paid_out_total: '500',
+      fee_total: '10',
+      last_event_ledger: 20,
+    },
+  ]);
+
+  const newCalls = stub.calls.slice(beforeCalls);
+  assertEquals(newCalls.length, 2);
+  assertEquals(newCalls[0]?.op, 'select');
+  assertEquals(newCalls[1]?.op, 'upsert');
+
+  const g1Row = stub.rows('groups').find((r) => r['contract_id'] === G1);
+  const g2Row = stub.rows('groups').find((r) => r['contract_id'] === G2);
+  assertEquals(g1Row?.['status'], 'active');
+  assertEquals(g2Row?.['status'], 'completed');
 });
 
 Deno.test('IndexerDb.recordRunFailure never throws on error response', async () => {

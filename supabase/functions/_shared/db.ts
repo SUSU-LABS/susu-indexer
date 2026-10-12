@@ -439,27 +439,35 @@ export class IndexerDb {
     if (states.length === 0) return;
     const updatedAt = new Date().toISOString();
 
-    for (const state of states) {
-      const { contract_id: contractId, ...figures } = state;
+    // Verify all groups exist in a single query before updating.
+    // Zero rows means reconciliation was asked about a group that has no row,
+    // so discovery and ingest disagree. Creating one here would write a group
+    // with no identity, which is worse than failing the run.
+    const contractIds = states.map((s) => s.contract_id);
+    const existing = await this.#selectIn('groups', 'contract_id', contractIds);
+    const existingSet = new Set(existing.map((r) => String(r['contract_id'])));
 
-      const { error, count } = await this.#client
-        .from('groups')
-        .update({ ...figures, updated_at: updatedAt }, { count: 'exact' })
-        .eq('contract_id', contractId);
-
-      if (error) {
-        throw new Error(`Failed to record group state: ${error.message}`);
-      }
-
-      // Zero rows means reconciliation was asked about a group that has no row,
-      // so discovery and ingest disagree. Creating one here would write a group
-      // with no identity, which is worse than failing the run.
-      if (count === 0) {
+    for (const contractId of contractIds) {
+      if (!existingSet.has(contractId)) {
         throw new Error(
           `Failed to record group state: no groups row for ${contractId}. ` +
             'Reconciliation updates existing groups; it never creates them.',
         );
       }
+    }
+
+    // Single bulk upsert with onConflict on contract_id: O(1) DB round trips instead of N.
+    const rows = states.map((state) => ({
+      ...state,
+      updated_at: updatedAt,
+    }));
+
+    const { error } = await this.#client
+      .from('groups')
+      .upsert(rows, { onConflict: 'contract_id' });
+
+    if (error) {
+      throw new Error(`Failed to record group state: ${error.message}`);
     }
   }
 
