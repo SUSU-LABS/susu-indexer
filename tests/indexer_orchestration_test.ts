@@ -61,6 +61,8 @@ type StubCall = {
 class StubSupabaseClient {
   readonly tables = new Map<string, Row[]>();
   readonly calls: StubCall[] = [];
+  /** (table, order columns) recorded each time a builder applies .order(). */
+  readonly orders: Array<{ table: string; cols: string[] }> = [];
   /** When set, this operation throws instead of executing. */
   failOn: StubCall | null = null;
   /** When set, this operation returns `{ error }` instead of executing. */
@@ -111,7 +113,14 @@ class StubBuilder {
     return this;
   }
 
-  order(_col: string, _opts?: { ascending: boolean }): this {
+  order(col: string, _opts?: { ascending: boolean }): this {
+    // Record so tests can prove ORDER BY precedes the paged range.
+    const last = this.#client.orders[this.#client.orders.length - 1];
+    if (last !== undefined && last.table === this.#table) {
+      last.cols.push(col);
+    } else {
+      this.#client.orders.push({ table: this.#table, cols: [col] });
+    }
     return this;
   }
 
@@ -588,6 +597,48 @@ Deno.test('IndexerDb.advanceCheckpoint writes the checkpoint row', async () => {
   assertEquals(rows.length, 1);
   assertEquals(rows[0]?.['last_processed_ledger'], 99);
   assertEquals(rows[0]?.['start_ledger'], 1);
+});
+
+/**
+ * A paged read over a table larger than pageSize must return every row
+ * exactly once. OFFSET/LIMIT without ORDER BY is not stable under
+ * concurrent writes; the ORDER BY applied inside #selectIn makes the
+ * snapshot consistent. The fixture here is >1000 rows to satisfy the
+ * acceptance criterion, with the stub's underlying array deliberately
+ * shuffled so no natural insertion order rescues a broken read.
+ */
+Deno.test('IndexerDb.readGroupFacts pages a >1000-row group completely', async () => {
+  const { stub, db } = makeDeps([], SCENARIO_HEAD);
+  stub.rows('groups').push({ contract_id: GROUP_ID, status: 'open' });
+
+  // 1200 member rows in a shuffled order — a missing ORDER BY or a broken
+  // page loop shows up as a duplicated or dropped member.
+  const total = 1200;
+  const members = Array.from({ length: total }, (_, i) => ({
+    contract_id: GROUP_ID,
+    position: i + 1,
+  }));
+  for (let i = members.length - 1; i > 0; i--) {
+    const j = (i * 7919) % (i + 1); // deterministic shuffle
+    const a = members[i]!;
+    members[i] = members[j]!;
+    members[j] = a;
+  }
+  stub.rows('group_members').push(...members);
+
+  const facts = await db.readGroupFacts([GROUP_ID], 7);
+
+  assertEquals(facts.get(GROUP_ID)?.members.length, total);
+  const positions = new Set(
+    facts.get(GROUP_ID)!.members.map((m) => m.position),
+  );
+  assertEquals(positions.size, total, 'every member read exactly once');
+
+  // And the order was actually applied: the stub recorded it per table.
+  const memberOrder = stub.orders.find((o) => o.table === 'group_members');
+  assert(memberOrder !== undefined, 'ORDER BY applied to group_members');
+  assert(memberOrder.cols.includes('contract_id'));
+  assert(memberOrder.cols.includes('position'));
 });
 
 Deno.test('IndexerDb.upsertGroupState throws when the group has no row', async () => {
