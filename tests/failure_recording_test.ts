@@ -78,6 +78,7 @@ Deno.test('handleRequest returns structured 500 when indexer run fails and recor
     usdcContractId: `C${'B'.repeat(55)}`,
     startLedger: 1,
     maxLedgersPerRun: 1000,
+    writeBatch: 500,
     allowMainnet: false,
   };
 
