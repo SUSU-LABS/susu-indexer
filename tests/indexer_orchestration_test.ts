@@ -553,12 +553,43 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // The tip is recorded so lag alert has fresh input; no events or runs are written.
     assertEquals(
       stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      [{ table: 'indexer_checkpoints', op: 'update' }],
     );
     assertEquals(rpc.requests, []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest surfaces tip_regression when chain tip is behind checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const regressedHead = SCENARIO_HEAD - 10;
+    const { stub, db, rpc } = makeDeps([], regressedHead);
+    await db.advanceCheckpoint({ lastProcessedLedger: SCENARIO_HEAD, startLedger: SCENARIO_FROM });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'tip_regression');
+    assertEquals(body.reason, 'tip_regression');
+    assertEquals(body.latestLedger, regressedHead);
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(body.behindBy, 10);
+
+    // Tip was not written to DB to prevent masking lag alerts
+    const updates = stub.calls.filter((call) =>
+      call.op === 'update' && call.table === 'indexer_checkpoints'
+    );
+    assertEquals(updates.length, 0);
+
+    // No events requested, no indexed events written
+    assertEquals(rpc.requests, []);
+    assertEquals(stub.rows('indexed_events').length, 0);
   } finally {
     restoreEnv();
   }

@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  computeLedgerRange,
+  isTipRegression,
+  ledgerLag,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -32,7 +37,7 @@ import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -55,7 +60,7 @@ type RequestDependencies = {
 };
 
 type RunSummary = {
-  status: 'ok' | 'skipped' | 'failed';
+  status: 'ok' | 'skipped' | 'failed' | 'tip_regression';
   correlationId: string;
   ledgerFrom?: number;
   ledgerTo?: number;
@@ -64,6 +69,8 @@ type RunSummary = {
   eventsRejected?: number;
   groupsDiscovered?: number;
   checkpoint?: number;
+  latestLedger?: number;
+  behindBy?: number;
   lag?: number;
   reason?: string;
 };
@@ -167,6 +174,32 @@ export async function handleRequest(
       startLedger: checkpoint?.startLedger ?? config.startLedger,
       maxRange: config.maxLedgersPerRun,
     });
+
+    const regression = isTipRegression({
+      lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
+      startLedger: checkpoint?.startLedger ?? config.startLedger,
+      latestLedger,
+    });
+
+    if (regression.isRegression) {
+      logger.warn('Chain-tip regression detected', {
+        latestLedger,
+        checkpoint: checkpoint?.lastProcessedLedger,
+        startLedger: checkpoint?.startLedger ?? config.startLedger,
+        behindBy: regression.behindBy,
+      });
+      return jsonResponse(
+        {
+          status: 'tip_regression',
+          reason: 'tip_regression',
+          correlationId,
+          checkpoint: checkpoint?.lastProcessedLedger,
+          latestLedger,
+          behindBy: regression.behindBy,
+        },
+        200,
+      );
+    }
 
     if (range === null) {
       logger.info('Nothing to index', { latestLedger });
