@@ -435,31 +435,27 @@ export class IndexerDb {
    * introduces a group, and if asked to, something is wrong enough to say so
    * rather than create a half-populated row.
    */
+  /**
+   * Applies every reconciled group state in one round trip.
+   *
+   * The `apply_group_states` RPC performs a single `UPDATE ... FROM (jsonb
+   * values)` server-side: the per-group `UPDATE ... .eq('contract_id', ...)`
+   * loop this replaced cost one HTTP round trip per group, so a busy range
+   * multiplied latency and failure surface by the groups touched.
+   *
+   * The "zero rows updated is an error" invariant lives inside the function:
+   * a contract_id with no `groups` row raises, because reconciliation updates
+   * existing groups and never creates them.
+   */
   async upsertGroupState(states: readonly GroupState[]): Promise<void> {
     if (states.length === 0) return;
-    const updatedAt = new Date().toISOString();
 
-    for (const state of states) {
-      const { contract_id: contractId, ...figures } = state;
+    const { error } = await this.#client.rpc('apply_group_states', {
+      p_states: states,
+    });
 
-      const { error, count } = await this.#client
-        .from('groups')
-        .update({ ...figures, updated_at: updatedAt }, { count: 'exact' })
-        .eq('contract_id', contractId);
-
-      if (error) {
-        throw new Error(`Failed to record group state: ${error.message}`);
-      }
-
-      // Zero rows means reconciliation was asked about a group that has no row,
-      // so discovery and ingest disagree. Creating one here would write a group
-      // with no identity, which is worse than failing the run.
-      if (count === 0) {
-        throw new Error(
-          `Failed to record group state: no groups row for ${contractId}. ` +
-            'Reconciliation updates existing groups; it never creates them.',
-        );
-      }
+    if (error) {
+      throw new Error(`Failed to record group state: ${error.message}`);
     }
   }
 
