@@ -41,6 +41,20 @@ export type ConfigResult =
 
 const CONTRACT_ID_PATTERN = /^C[A-Z2-7]{55}$/;
 
+/**
+ * The passphrase each network name is expected to pair with.
+ *
+ * `network` selects which chain a deployment talks to, and the passphrase is
+ * the string signed into every envelope on that chain, so the two have to
+ * agree. A testnet deployment pointed at the mainnet passphrase reads a
+ * healthy-looking index of the wrong network, which no later step notices.
+ */
+const NETWORK_PASSPHRASES: Record<IndexerConfig['network'], string> = {
+  local: 'Standalone Network ; February 2017',
+  testnet: 'Test SDF Network ; September 2015',
+  mainnet: 'Public Global Stellar Network ; September 2015',
+};
+
 function readString(env: Record<string, string | undefined>, key: string): string | undefined {
   const value = env[key];
   if (value === undefined) return undefined;
@@ -131,6 +145,24 @@ export function loadConfig(
     invalid.push('STELLAR_NETWORK=mainnet requires ALLOW_MAINNET=true (explicit approval)');
   }
 
+  // The passphrase is only meaningful as a pair with the network name, so a
+  // mismatch is a configuration error rather than a preference: it makes the
+  // indexer decode envelopes from another network. Surrounding quotes are
+  // tolerated because dotenv files are often hand-written with them.
+  const networkPassphrase = (values['STELLAR_NETWORK_PASSPHRASE'] as string).replace(
+    /^["']|["']$/g,
+    '',
+  ).trim();
+  if (NETWORK_PASSPHRASES[network] !== undefined) {
+    if (networkPassphrase !== NETWORK_PASSPHRASES[network]) {
+      invalid.push(
+        `STELLAR_NETWORK_PASSPHRASE (must be "${
+          NETWORK_PASSPHRASES[network]
+        }" for STELLAR_NETWORK=${network})`,
+      );
+    }
+  }
+
   const maxLedgers = readPositiveInt(env, 'INDEXER_MAX_LEDGER_RANGE', 1000);
   if (!maxLedgers.valid || maxLedgers.value > 100_000) {
     invalid.push('INDEXER_MAX_LEDGER_RANGE (must be an integer between 1 and 100000)');
@@ -153,7 +185,7 @@ export function loadConfig(
       taskSecret,
       rpcUrl,
       network,
-      networkPassphrase: values['STELLAR_NETWORK_PASSPHRASE'] as string,
+      networkPassphrase,
       factoryContractId,
       usdcContractId,
       startLedger: startLedger.value,
