@@ -30,7 +30,7 @@ import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_sha
 import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
-import { withRetry } from '../_shared/retry.ts';
+import { withRetry, type RetryOptions } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
 import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
@@ -52,6 +52,11 @@ type RequestDependencies = {
   rpc?: RpcSource;
   config?: IndexerConfig;
   env?: Record<string, string | undefined>;
+  /**
+   * Retry policy override for tests — the injected `sleep` lets failure-
+   * injection run without real delays.
+   */
+  retry?: RetryOptions;
 };
 
 type RunSummary = {
@@ -104,17 +109,18 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
 async function reconcileGroups(
   db: IndexerDb,
   contractIds: readonly string[],
+  retry: RetryOptions = RETRY,
 ): Promise<string[]> {
   if (contractIds.length === 0) return [];
 
-  const states = await withRetry(() => db.readDerivedGroupState(contractIds), RETRY);
+  const states = await withRetry(() => db.readDerivedGroupState(contractIds), retry);
 
-  const stored = await withRetry(() => db.readGroupState(contractIds), RETRY);
+  const stored = await withRetry(() => db.readGroupState(contractIds), retry);
   const divergences = states.flatMap((state) =>
     compareGroupState(stored.get(state.contract_id), state)
   );
 
-  await withRetry(() => db.upsertGroupState(states), RETRY);
+  await withRetry(() => db.upsertGroupState(states), retry);
 
   return divergences;
 }
@@ -125,6 +131,7 @@ export async function handleRequest(
 ): Promise<Response> {
   const correlationId = crypto.randomUUID();
   const logger = createLogger(correlationId);
+  const retry = deps.retry ?? RETRY;
 
   const rawTaskSecret = deps.config?.taskSecret ??
     (deps.env ? deps.env['INDEXER_TASK_SECRET'] : Deno.env.get('INDEXER_TASK_SECRET'));
@@ -158,8 +165,8 @@ export async function handleRequest(
   let failedRange: { from: number; to: number } | null = null;
 
   try {
-    const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
-    const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
+    const checkpoint = await withRetry(() => db.getCheckpoint(), retry);
+    const latestLedger = await withRetry(() => rpc.getLatestLedger(), retry);
 
     const range = computeLedgerRange({
       lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
@@ -173,7 +180,7 @@ export async function handleRequest(
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the
       // indexer looks idle but healthy.
-      await withRetry(() => db.recordLatestLedger(latestLedger), RETRY);
+      await withRetry(() => db.recordLatestLedger(latestLedger), retry);
       return jsonResponse(
         {
           status: 'skipped',
@@ -196,7 +203,7 @@ export async function handleRequest(
     // The watch list: the Factory, the token, and every group seen so far. A
     // group's events are emitted by its own contract, so without the groups the
     // indexer would see only the Factory and nothing a group ever did.
-    const knownGroups = await withRetry(() => db.listGroupContractIds(), RETRY);
+    const knownGroups = await withRetry(() => db.listGroupContractIds(), retry);
     const watched = [config.factoryContractId, config.usdcContractId, ...knownGroups];
 
     const firstPass = await fetchRangeEvents(rpc, watched, range.from, range.to);
@@ -276,16 +283,16 @@ export async function handleRequest(
 
     // Groups before events: every other fact refers to a group row, and in the
     // range that discovers a group, both arrive together.
-    await withRetry(() => db.upsertGroups(newGroups), RETRY);
-    await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), RETRY);
-    await withRetry(() => db.recordRejectedEvents(correlationId, rejectedRows), RETRY);
+    await withRetry(() => db.upsertGroups(newGroups), retry);
+    await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), retry);
+    await withRetry(() => db.recordRejectedEvents(correlationId, rejectedRows), retry);
 
     const plan = planIngest(decoded);
-    await withRetry(() => db.persistPlan(plan), RETRY);
+    await withRetry(() => db.persistPlan(plan), retry);
 
     // Recompute rather than accumulate: a range processed twice corrects the
     // figures instead of inflating them.
-    const divergences = await reconcileGroups(db, plan.touchedGroups);
+    const divergences = await reconcileGroups(db, plan.touchedGroups, retry);
     if (divergences.length > 0) {
       logger.warn('Group state disagreed with the recorded facts; repaired from them', {
         divergences: divergences.length,
