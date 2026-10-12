@@ -32,7 +32,7 @@ import { createLogger } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
-import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
+import { compareGroupState } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -166,6 +166,15 @@ export async function handleRequest(
       latestLedger,
       startLedger: checkpoint?.startLedger ?? config.startLedger,
       maxRange: config.maxLedgersPerRun,
+      onStartLedgerIgnored: ({ startLedger, resumedFrom }) => {
+        // Prominent by design: someone raised the start ledger expecting it
+        // to take effect, and obeying it would carve a permanent gap in the
+        // index. The range resumes after the checkpoint instead.
+        logger.warn(
+          'Start ledger is ahead of the checkpoint and was ignored; resuming after the last processed ledger',
+          { startLedger, resumedFrom },
+        );
+      },
     });
 
     if (range === null) {

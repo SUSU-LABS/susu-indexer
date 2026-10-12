@@ -39,6 +39,14 @@ export type LedgerRange = {
  * `startLedger`, which is the ledger the contracts were deployed at. On later
  * runs it resumes immediately after the checkpoint, so no ledger is skipped.
  *
+ * A `startLedger` raised above the checkpoint (`startLedger >
+ * lastProcessedLedger + 1`) never advances the range: the indexer resumes
+ * after the checkpoint, and `onStartLedgerIgnored` is invoked so the caller
+ * can warn loudly. Raising the start ledger used to silently carve a permanent
+ * gap in the index; the documented rebuild procedure (resetting
+ * `last_processed_ledger` to `start_ledger - 1`) is unaffected because there
+ * `startLedger` equals exactly `lastProcessedLedger + 1`.
+ *
  * Returns `null` when the indexer is already caught up to the chain head.
  * Throws on invalid input rather than guessing — a bad range could skip ledgers.
  */
@@ -47,6 +55,15 @@ export function computeLedgerRange(params: {
   latestLedger: number;
   startLedger: number;
   maxRange: number;
+  /**
+   * Invoked when an existing checkpoint makes `startLedger` irrelevant because
+   * honouring it would skip ledgers. The caller should log this prominently:
+   * someone raised the start ledger expecting it to take effect.
+   */
+  onStartLedgerIgnored?: (detail: {
+    startLedger: number;
+    resumedFrom: number;
+  }) => void;
 }): LedgerRange | null {
   const { lastProcessedLedger, latestLedger, startLedger, maxRange } = params;
 
@@ -65,9 +82,21 @@ export function computeLedgerRange(params: {
     }
   }
 
-  const from = lastProcessedLedger === null
-    ? startLedger
-    : Math.max(lastProcessedLedger + 1, startLedger);
+  // `startLedger` is honoured only when there is no checkpoint. Once a
+  // checkpoint exists, resuming after it is the only way to avoid skipping
+  // ledgers; a raised start ledger is ignored loudly rather than obeyed
+  // silently.
+  const from = lastProcessedLedger === null ? startLedger : lastProcessedLedger + 1;
+
+  if (
+    lastProcessedLedger !== null &&
+    startLedger > lastProcessedLedger + 1
+  ) {
+    params.onStartLedgerIgnored?.({
+      startLedger,
+      resumedFrom: from,
+    });
+  }
 
   if (from > latestLedger) return null;
 
