@@ -564,6 +564,37 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
   }
 });
 
+Deno.test('handleRequest reports a tip behind the checkpoint instead of a skip', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    // The node answers from a stale replica: the head is below what the
+    // checkpoint already claims as processed.
+    const staleHead = SCENARIO_HEAD - 50;
+    const { stub, db, rpc } = makeDeps([], staleHead);
+    await db.advanceCheckpoint({ lastProcessedLedger: SCENARIO_HEAD, startLedger: SCENARIO_FROM });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+
+    // A regression is not an idle run: it must not be reported as 'skipped'.
+    assertEquals(body.status, 'tip_regression');
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+
+    // The tip was still observed, so the lag alert keeps its input, and no
+    // ledger work is attempted.
+    assertEquals(stub.callsTo('indexer_checkpoints', 'update').length, 1);
+    assertEquals(
+      stub.calls.filter((call) => call.op !== 'select' && call.op !== 'update'),
+      [],
+    );
+    assertEquals(rpc.requests, []);
+  } finally {
+    restoreEnv();
+  }
+});
+
 Deno.test('IndexerDb.getCheckpoint returns undefined when the indexer never ran', async () => {
   const { db } = makeDeps([], SCENARIO_HEAD);
   assertEquals(await db.getCheckpoint(), undefined);
