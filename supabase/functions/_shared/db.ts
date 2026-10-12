@@ -60,6 +60,30 @@ export type RejectedEventRow = {
   reason: string;
 };
 
+/**
+ * The `ORDER BY` columns each paged table requires to ensure stable pagination.
+ *
+ * Postgres only guarantees a stable row order across `OFFSET/LIMIT` pages when
+ * the query carries an `ORDER BY` that is unique per row. Every table
+ * `#selectIn` reads has one already: its primary key, prefixed with
+ * `contract_id` so the ordering matches the `IN (...)` chunk being read.
+ * A tiebreaker that is not unique would let a concurrent insert move a row
+ * between two pages, which is what this mapping exists to prevent.
+ */
+const PAGE_ORDER: Record<string, string[]> = {
+  group_members: ['contract_id', 'member'],
+  contributions: ['contract_id', 'event_identity'],
+  payouts: ['contract_id', 'event_identity'],
+  protocol_fees: ['contract_id', 'event_identity'],
+  decoded_events: ['contract_id', 'event_identity'],
+  groups: ['contract_id'],
+};
+
+/** Columns to order a paged read by; `contract_id` is the fallback key. */
+function pageOrder(table: string): string[] {
+  return PAGE_ORDER[table] ?? ['contract_id'];
+}
+
 export class IndexerDb {
   #client: SupabaseClient;
 
@@ -488,12 +512,23 @@ export class IndexerDb {
           .select(columns)
           .in('contract_id', chunk);
 
-        const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
-          ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(
+        let orderedQuery = selectQuery;
+        if (typeof (orderedQuery as { order?: unknown }).order === 'function') {
+          for (const col of pageOrder(table)) {
+            orderedQuery = (
+              orderedQuery as {
+                order: (col: string, opts?: { ascending: boolean }) => typeof orderedQuery;
+              }
+            ).order(col, { ascending: true });
+          }
+        }
+
+        const pagedQuery = typeof (orderedQuery as { range?: unknown }).range === 'function'
+          ? (orderedQuery as { range: (from: number, to: number) => typeof orderedQuery }).range(
             from,
             to,
           )
-          : selectQuery;
+          : orderedQuery;
 
         const { data, error } = await pagedQuery;
 
