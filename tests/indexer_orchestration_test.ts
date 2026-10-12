@@ -70,6 +70,30 @@ class StubSupabaseClient {
     return new StubBuilder(this, table);
   }
 
+  rpc(fn: string, params: Record<string, unknown>): Promise<{ data: unknown; error: null }> {
+    this.calls.push({ table: `rpc:${fn}`, op: 'select' });
+    if (fn === 'reconcile_group_states') {
+      // The SQL function returns the contract IDs that had no group row.
+      // Reconciliation updates existing groups; it never creates them.
+      const states = (params['p_states'] as Record<string, unknown>[]) ?? [];
+      const rows = this.rows('groups');
+      const missing = states
+        .map((s) => String(s['contract_id']))
+        .filter((id) => !rows.some((r) => String(r['contract_id']) === id));
+      // Simulate the upsert for rows that do exist.
+      for (const state of states) {
+        const id = String(state['contract_id']);
+        const existing = rows.find((r) => String(r['contract_id']) === id);
+        if (existing) Object.assign(existing, state);
+      }
+      return Promise.resolve({ data: missing, error: null });
+    }
+    // The derive_group_state RPC aggregates facts in Postgres; the stub has no
+    // SQL engine, so return no derived rows. Tests that need derived state
+    // assert on the persisted group rows, not on the RPC itself.
+    return Promise.resolve({ data: [], error: null });
+  }
+
   rows(table: string): Row[] {
     let rows = this.tables.get(table);
     if (!rows) {
@@ -553,10 +577,10 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // Only the latest-ledger heartbeat write happened: no events, no other writes.
     assertEquals(
       stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      [{ table: 'indexer_checkpoints', op: 'update' }],
     );
     assertEquals(rpc.requests, []);
   } finally {
