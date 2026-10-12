@@ -564,6 +564,33 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
   }
 });
 
+Deno.test('handleRequest with checkpoint ignores raised startLedger and does not skip', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    // Override env with a raised start ledger far ahead of the scenario
+    Deno.env.set('INDEXER_START_LEDGER', String(SCENARIO_HEAD + 5000));
+
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    // Checkpoint exists right before SCENARIO_FROM
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_FROM - 1,
+      startLedger: SCENARIO_FROM,
+    });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+
+    // Verify it processed the checkpoint range, not jumped to SCENARIO_HEAD + 5000
+    assertEquals(body.ledgerFrom, SCENARIO_FROM);
+    assertEquals(body.ledgerTo, SCENARIO_HEAD);
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+  } finally {
+    restoreEnv();
+  }
+});
+
 Deno.test('IndexerDb.getCheckpoint returns undefined when the indexer never ran', async () => {
   const { db } = makeDeps([], SCENARIO_HEAD);
   assertEquals(await db.getCheckpoint(), undefined);

@@ -4,6 +4,7 @@ import {
   type Checkpoint,
   computeLedgerRange,
   ledgerLag,
+  startLedgerAheadOfCheckpoint,
 } from '../supabase/functions/_shared/checkpoint.ts';
 
 function checkpoint(lastProcessedLedger: number, startLedger = 1): Checkpoint {
@@ -176,4 +177,43 @@ Deno.test('ledgerLag reports the distance from the chain tip', () => {
 
 Deno.test('ledgerLag never reports a negative lag', () => {
   assertEquals(ledgerLag(checkpoint(110), 100), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Start ledger safety
+// ---------------------------------------------------------------------------
+
+Deno.test('a raised startLedger does not cause computeLedgerRange to skip past checkpoint', () => {
+  // Checkpoint is at 1000, startLedger is raised to 2000.
+  // Range must resume at 1001, never skipping to 2000.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 1000,
+      latestLedger: 5000,
+      startLedger: 2000,
+      maxRange: 100,
+    }),
+    { from: 1001, to: 1100, truncated: true },
+  );
+});
+
+Deno.test('documented rebuild procedure reset correctly takes effect', () => {
+  // Documented rebuild: set lastProcessedLedger = newStart - 1
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 1999,
+      latestLedger: 5000,
+      startLedger: 2000,
+      maxRange: 100,
+    }),
+    { from: 2000, to: 2099, truncated: true },
+  );
+});
+
+Deno.test('startLedgerAheadOfCheckpoint detects when startLedger is ahead of checkpoint', () => {
+  assertEquals(startLedgerAheadOfCheckpoint(1000, 2000), true);
+  assertEquals(startLedgerAheadOfCheckpoint(1000, 1002), true);
+  assertEquals(startLedgerAheadOfCheckpoint(1000, 1001), false);
+  assertEquals(startLedgerAheadOfCheckpoint(1000, 500), false);
+  assertEquals(startLedgerAheadOfCheckpoint(null, 2000), false);
 });
