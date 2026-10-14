@@ -7,6 +7,8 @@
  * a partially processed range is simply retried on the next run.
  */
 
+import { RpcError } from './stellar.ts';
+
 export type RetryOptions = {
   attempts: number;
   baseDelayMs: number;
@@ -59,4 +61,30 @@ export async function withRetry<T>(
 
   // Unreachable: the loop either returns or throws.
   throw lastError;
+}
+
+/**
+ * Retry classification shared by the scan and the run loop.
+ *
+ * Only a transient failure deserves another attempt: a network fault, a
+ * timeout, HTTP 408/429/5xx, or a database transport error (SQLSTATE 08xxx).
+ * A deterministic fault — a 4xx response, a JSON-RPC protocol error such as
+ * -32600, or a Postgres constraint violation — cannot be repaired by
+ * waiting, so it is attempted once.
+ */
+export function isTransient(error: unknown): boolean {
+  if (error instanceof RpcError) {
+    if (error.status !== undefined) {
+      return error.status === 408 || error.status === 429 || error.status >= 500;
+    }
+    // Without an HTTP status the fetch layer distinguishes transport from
+    // protocol: 'RPC request failed: <cause>' is the network fault; 'RPC error
+    // -32600: ...' is the deterministic one.
+    return error.message.startsWith('RPC request failed');
+  }
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string') {
+    return code.startsWith('08');
+  }
+  return false;
 }
