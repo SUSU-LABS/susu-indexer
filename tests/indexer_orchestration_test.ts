@@ -24,6 +24,7 @@ import type {
   RpcEvent,
 } from '../supabase/functions/_shared/stellar.ts';
 import { FACTORY_ID, factoryEvent, GROUP_ID, groupEvents } from './fixture.ts';
+import { deriveGroupState } from '../supabase/functions/_shared/state.ts';
 
 type Row = Record<string, unknown>;
 
@@ -45,7 +46,7 @@ const GROUPS_DEFAULTS: Row = {
 
 type StubCall = {
   table: string;
-  op: 'select' | 'upsert' | 'insert' | 'update';
+  op: 'select' | 'upsert' | 'insert' | 'update' | 'rpc';
 };
 
 /**
@@ -65,6 +66,11 @@ class StubSupabaseClient {
   failOn: StubCall | null = null;
   /** When set, this operation returns `{ error }` instead of executing. */
   errorOn: StubCall | null = null;
+  /**
+   * Consumed on first match: the next (table, op) errors once, then the entry
+   * is removed so retries succeed — the transient-failure shape.
+   */
+  errorOnceOn: StubCall[] = [];
 
   from(table: string): StubBuilder {
     return new StubBuilder(this, table);
@@ -79,6 +85,79 @@ class StubSupabaseClient {
     return rows;
   }
 
+  /**
+   * The function surface IndexerDb uses. `apply_group_states` mirrors the
+   * migration: one call applies the whole batch, and any contract_id with no
+   * `groups` row returns an error instead of silently creating the group.
+   */
+  rpc(
+    name: string,
+    params: Record<string, unknown>,
+  ): Promise<{ data: unknown; error: { message: string } | null }> {
+    this.calls.push({ table: name, op: 'rpc' });
+
+    if (name === 'apply_group_states') {
+      const states = params['p_states'] as Row[];
+      for (const state of states) {
+        const row = this.rows('groups').find((r) => r['contract_id'] === state['contract_id']);
+        if (!row) {
+          return Promise.resolve({
+            data: null,
+            error: {
+              message:
+                `no groups row for ${state['contract_id']} — reconciliation ` +
+                'updates existing groups; it never creates them.',
+            },
+          });
+        }
+      }
+      for (const state of states) {
+        const row = this.rows('groups').find((r) => r['contract_id'] === state['contract_id']);
+        if (row) Object.assign(row, { ...state, updated_at: 'stub' });
+      }
+      return Promise.resolve({ data: states.length, error: null });
+    }
+
+    if (name === 'derive_group_state') {
+      const ids = (params['p_contract_ids'] as string[]) ?? [];
+      const rows = ids.map((id) => {
+        const facts = {
+          members: this.rows('group_members').filter((r) => r['contract_id'] === id)
+            .map((r) => ({ position: Number(r['position']) })),
+          contributions: this.rows('contributions').filter((r) => r['contract_id'] === id)
+            .map((r) => ({ round: Number(r['round']), amount: String(r['amount']) })),
+          payouts: this.rows('payouts').filter((r) => r['contract_id'] === id)
+            .map((r) => ({ round: Number(r['round']), recipient_amount: String(r['recipient_amount']) })),
+          fees: this.rows('protocol_fees').filter((r) => r['contract_id'] === id)
+            .map((r) => ({ round: Number(r['round']), fee: String(r['fee']) })),
+          started: this.rows('decoded_events').some((r) =>
+            r['contract_id'] === id && r['event_type'] === 'start'),
+          completed: this.rows('decoded_events').some((r) =>
+            r['contract_id'] === id && r['event_type'] === 'completed'),
+          lastEventLedger: this.rows('decoded_events')
+            .filter((r) => r['contract_id'] === id)
+            .reduce((m, r) => Math.max(m, Number(r['ledger'])), 0),
+        };
+        const derived = deriveGroupState(id, facts);
+        return {
+          contract_id: id,
+          member_count: String(derived.member_count),
+          current_round: derived.current_round,
+          completed_rounds: derived.completed_rounds,
+          contributed_total: derived.contributed_total,
+          paid_out_total: derived.paid_out_total,
+          fee_total: derived.fee_total,
+          started: derived.status !== 'open',
+          completed: derived.status === 'completed',
+          last_event_ledger: String(derived.last_event_ledger),
+        };
+      });
+      return Promise.resolve({ data: rows, error: null });
+    }
+
+    return Promise.resolve({ data: null, error: { message: `unstubbed rpc ${name}` } });
+  }
+
   callsTo(table: string, op: StubCall['op']): StubCall[] {
     return this.calls.filter((c) => c.table === table && c.op === op);
   }
@@ -89,7 +168,7 @@ type Filter = { column: string; op: 'eq' | 'in' | 'lt'; value: unknown };
 class StubBuilder {
   #client: StubSupabaseClient;
   #table: string;
-  #mode: StubCall['op'] | null = null;
+  #mode: Exclude<StubCall['op'], 'rpc'> | null = null;
   #filters: Filter[] = [];
   #maybeSingle = false;
   #upsertRows: Row[] = [];
@@ -191,6 +270,13 @@ class StubBuilder {
   #run(): Promise<unknown> {
     const mode = this.#mode;
     if (mode === null) return Promise.reject(new Error('stub: builder awaited with no operation'));
+    const once = this.#client.errorOnceOn.findIndex(
+      (c) => c.table === this.#table && c.op === mode,
+    );
+    if (once >= 0) {
+      this.#client.errorOnceOn.splice(once, 1);
+      return Promise.resolve({ error: { message: 'transient stub failure' } });
+    }
     const failOn = this.#client.failOn;
     if (failOn !== null && failOn.table === this.#table && failOn.op === mode) {
       return Promise.reject(new Error(`stubbed failure: ${mode} on ${this.#table}`));
@@ -259,9 +345,16 @@ class ScriptedRpc implements RpcSource {
     return Promise.resolve(this.head);
   }
 
+  /** Transient failures to inject into `getEvents` before it starts succeeding. */
+  getEventsFailures = 0;
+
   getEvents(
     params: EventPageStart & { contractIds: string[]; limit?: number },
   ): Promise<GetEventsResult> {
+    if (this.getEventsFailures > 0) {
+      this.getEventsFailures--;
+      return Promise.reject(new Error('transient rpc failure'));
+    }
     const { limit: _limit, ...recorded } = params;
     this.requests.push(recorded);
     if (params.kind === 'range') {
@@ -483,6 +576,86 @@ Deno.test('IndexerDb.recordRejectedEvents throws so a rejection cannot be silent
   );
 });
 
+/**
+ * Endpoint-level failure injection: a transient fault on the second attempt
+ * must still yield a successful run — checkpoint advanced exactly once, no
+ * failure row. The injected `sleep` keeps the retry's backoff instant.
+ */
+const INSTANT_SLEEP = () => Promise.resolve();
+
+Deno.test('a transient getEvents failure still yields a successful run', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    rpc.getEventsFailures = 1;
+
+    const response = await handleRequest(authorizedRequest(), {
+      db,
+      rpc,
+      retry: { attempts: 4, baseDelayMs: 1, maxDelayMs: 4, sleep: INSTANT_SLEEP },
+    });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+
+    // Writes happened, the checkpoint advanced exactly once, and no failure
+    // was recorded: the transient fault never surfaced to the operator.
+    assertEquals(stub.rows('indexed_events').length, body.eventsIndexed);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'upsert').length, 1);
+    assertEquals(stub.rows('indexer_runs').length, 0);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a transient db upsert failure still yields a successful run', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    stub.errorOnceOn = [{ table: 'indexed_events', op: 'upsert' }];
+
+    const response = await handleRequest(authorizedRequest(), {
+      db,
+      rpc,
+      retry: { attempts: 4, baseDelayMs: 1, maxDelayMs: 4, sleep: INSTANT_SLEEP },
+    });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+
+    assertEquals(stub.rows('indexed_events').length, body.eventsIndexed);
+    assertEquals(stub.callsTo('indexer_checkpoints', 'upsert').length, 1);
+    assertEquals(stub.rows('indexer_runs').length, 0);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a permanently failing dependency records one failure and no checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([factoryEvent(5), ...groupEvents], SCENARIO_HEAD);
+    // Fails every time: all 4 attempts burn through, then the run fails.
+    stub.errorOn = { table: 'indexed_events', op: 'upsert' };
+
+    const response = await handleRequest(authorizedRequest(), {
+      db,
+      rpc,
+      retry: { attempts: 4, baseDelayMs: 1, maxDelayMs: 4, sleep: INSTANT_SLEEP },
+    });
+    assertEquals(response.status, 500);
+    const body = await response.json();
+    assertEquals(body.status, 'failed');
+
+    assertEquals(stub.callsTo('indexer_checkpoints', 'upsert'), []);
+    const runs = stub.rows('indexer_runs');
+    assertEquals(runs.length, 1);
+    assertEquals(runs[0]?.['status'], 'failed');
+  } finally {
+    restoreEnv();
+  }
+});
+
 Deno.test('IndexerDb.recordRejectedEvents is a no-op for an empty batch', async () => {
   const { stub, db } = makeDeps([], SCENARIO_HEAD);
   await db.recordRejectedEvents('corr', []);
@@ -553,9 +726,15 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // The checkpoint read plus the intentional latest-ledger observation
+    // write (lag-alert liveness — see handleRequest) happen; no events and no
+    // indexed-data writes.
     assertEquals(
-      stub.calls.filter((call) => call.op !== 'select'),
+      stub.calls.filter(
+        (call) =>
+          call.op !== 'select' &&
+          !(call.op === 'update' && call.table === 'indexer_checkpoints'),
+      ),
       [],
     );
     assertEquals(rpc.requests, []);
