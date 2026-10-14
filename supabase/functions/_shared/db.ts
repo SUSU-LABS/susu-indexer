@@ -286,14 +286,44 @@ export class IndexerDb {
     };
 
     const rows = await Promise.all([
-      this.#selectIn('group_members', 'contract_id, position', ids, pageSize),
-      this.#selectIn('contributions', 'contract_id, round, amount::text', ids, pageSize),
-      this.#selectIn('payouts', 'contract_id, round, recipient_amount::text', ids, pageSize),
-      this.#selectIn('protocol_fees', 'contract_id, round, fee::text', ids, pageSize),
+      this.#selectIn(
+        'group_members',
+        'contract_id, position',
+        ids,
+        pageSize,
+        ['contract_id', 'position'],
+      ),
+      this.#selectIn(
+        'contributions',
+        'contract_id, round, amount::text',
+        ids,
+        pageSize,
+        ['contract_id', 'event_identity'],
+      ),
+      this.#selectIn(
+        'payouts',
+        'contract_id, round, recipient_amount::text',
+        ids,
+        pageSize,
+        ['contract_id', 'event_identity'],
+      ),
+      this.#selectIn(
+        'protocol_fees',
+        'contract_id, round, fee::text',
+        ids,
+        pageSize,
+        ['contract_id', 'event_identity'],
+      ),
       // Lifecycle and the last ledger the group was heard from. `start` and
       // `completed` are the only events that change its status, and both are
       // emitted by the group itself.
-      this.#selectIn('decoded_events', 'contract_id, name, ledger', ids, pageSize),
+      this.#selectIn(
+        'decoded_events',
+        'contract_id, name, ledger',
+        ids,
+        pageSize,
+        ['contract_id', 'event_identity'],
+      ),
     ]);
 
     const [members, contributions, payouts, fees, events] = rows as [
@@ -397,6 +427,7 @@ export class IndexerDb {
         'contributed_total::text, paid_out_total::text, fee_total::text, last_event_ledger',
       contractIds,
       pageSize,
+      ['contract_id'],
     );
 
     for (const row of rows) {
@@ -468,6 +499,7 @@ export class IndexerDb {
     columns: string,
     contractIds: readonly string[],
     pageSize = 1000,
+    orderBy: readonly string[] = [],
   ): Promise<Record<string, unknown>[]> {
     if (contractIds.length === 0) return [];
     if (pageSize <= 0) {
@@ -483,10 +515,24 @@ export class IndexerDb {
 
       while (true) {
         const to = from + pageSize - 1;
-        const selectQuery = this.#client
+        // OFFSET/LIMIT without ORDER BY is not stable under concurrent writes —
+        // rows can shift between pages and be read twice or skipped entirely.
+        // Every caller passes a deterministic total order (contract_id plus a
+        // unique tiebreaker) so a paged read is a consistent snapshot of a
+        // moving table.
+        let selectQuery = this.#client
           .from(table)
           .select(columns)
           .in('contract_id', chunk);
+
+        for (const col of orderBy) {
+          const ordered = selectQuery as {
+            order?: (c: string, opts?: { ascending?: boolean }) => typeof selectQuery;
+          };
+          selectQuery = typeof ordered.order === 'function'
+            ? ordered.order(col, { ascending: true })
+            : selectQuery;
+        }
 
         const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
           ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(
