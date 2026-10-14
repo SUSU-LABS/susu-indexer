@@ -177,3 +177,43 @@ Deno.test('ledgerLag reports the distance from the chain tip', () => {
 Deno.test('ledgerLag never reports a negative lag', () => {
   assertEquals(ledgerLag(checkpoint(110), 100), 0);
 });
+
+Deno.test('computeLedgerRange ignores a raised startLedger when a checkpoint exists', () => {
+  const warnings: string[] = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: 1000,
+    latestLedger: 2000,
+    startLedger: 5000,   // raised — would silently skip 1001..4999 on the old code
+    maxRange: 100,
+    onWarning: (m) => warnings.push(m),
+  });
+  // The checkpoint wins: the range resumes immediately after it.
+  assertEquals(range?.from, 1001);
+  assertEquals(warnings.length, 1);
+});
+
+Deno.test('computeLedgerRange still honours startLedger on a fresh index', () => {
+  const warnings: string[] = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: null,
+    latestLedger: 2000,
+    startLedger: 500,
+    maxRange: 100,
+    onWarning: (m) => warnings.push(m),
+  });
+  assertEquals(range?.from, 500);
+  assertEquals(warnings.length, 0);
+});
+
+Deno.test('computeLedgerRange is quiet when startLedger trails the checkpoint', () => {
+  const warnings: string[] = [];
+  const range = computeLedgerRange({
+    lastProcessedLedger: 1000,
+    latestLedger: 2000,
+    startLedger: 500,
+    maxRange: 100,
+    onWarning: (m) => warnings.push(m),
+  });
+  assertEquals(range?.from, 1001);
+  assertEquals(warnings.length, 0);
+});
