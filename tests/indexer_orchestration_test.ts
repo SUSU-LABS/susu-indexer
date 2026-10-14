@@ -655,3 +655,40 @@ Deno.test('handleRequest returns structured 500 even when recordRunFailure inser
     restoreEnv();
   }
 });
+
+Deno.test('handleRequest reports a tip regression instead of skipped when the tip lags the checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { db, rpc } = makeDeps([], SCENARIO_HEAD - 200);
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_HEAD,
+      startLedger: SCENARIO_FROM,
+    });
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'tip_regression');
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest still reports skipped when genuinely caught up', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { db, rpc } = makeDeps([], SCENARIO_HEAD);
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_HEAD,
+      startLedger: SCENARIO_FROM,
+    });
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'skipped');
+  } finally {
+    restoreEnv();
+  }
+});

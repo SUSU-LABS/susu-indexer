@@ -47,8 +47,10 @@ export function computeLedgerRange(params: {
   latestLedger: number;
   startLedger: number;
   maxRange: number;
+  /** Reports a start ledger that was ignored because a checkpoint exists. */
+  onWarning?: (message: string) => void;
 }): LedgerRange | null {
-  const { lastProcessedLedger, latestLedger, startLedger, maxRange } = params;
+  const { lastProcessedLedger, latestLedger, startLedger, maxRange, onWarning } = params;
 
   if (!Number.isSafeInteger(latestLedger) || latestLedger < 0) {
     throw new Error('latestLedger must be a non-negative safe integer');
@@ -65,9 +67,21 @@ export function computeLedgerRange(params: {
     }
   }
 
-  const from = lastProcessedLedger === null
-    ? startLedger
-    : Math.max(lastProcessedLedger + 1, startLedger);
+  let from: number;
+  if (lastProcessedLedger === null) {
+    from = startLedger;
+  } else {
+    // A raised start ledger can only begin a fresh index. With a checkpoint
+    // present it would carve a permanent, invisible gap — resume strictly
+    // after the checkpoint and say so, so the misconfiguration is loud.
+    from = lastProcessedLedger + 1;
+    if (startLedger > from) {
+      onWarning?.(
+        `startLedger ${startLedger} ignored: a checkpoint at ledger ` +
+          `${lastProcessedLedger} already exists, so indexing resumes at ${from}`,
+      );
+    }
+  }
 
   if (from > latestLedger) return null;
 
