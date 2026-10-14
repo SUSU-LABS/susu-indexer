@@ -62,13 +62,24 @@ export type RejectedEventRow = {
 
 export class IndexerDb {
   #client: SupabaseClient;
+  #writeBatch: number;
 
   /**
    * An explicit client may be injected for tests, so the orchestration can be
    * exercised against a stub instead of a live database. Production callers
    * omit it and get the service-role client as before.
+   *
+   * `writeBatch` bounds every PostgREST write: a busy range can produce tens
+   * of thousands of rows, and one unbounded upsert exceeds request-body and
+   * statement limits — which then retries a call that can never succeed.
    */
-  constructor(supabaseUrl: string, serviceRoleKey: string, client?: SupabaseClient) {
+  constructor(
+    supabaseUrl: string,
+    serviceRoleKey: string,
+    client?: SupabaseClient,
+    writeBatch = 500,
+  ) {
+    this.#writeBatch = writeBatch;
     this.#client = client ??
       createClient(supabaseUrl, serviceRoleKey, {
         auth: { persistSession: false, autoRefreshToken: false },
@@ -107,15 +118,12 @@ export class IndexerDb {
    * the existing row is left as-is rather than overwritten.
    */
   async upsertEvents(rows: readonly IndexedEventRow[]): Promise<void> {
-    if (rows.length === 0) return;
-
-    const { error } = await this.#client
-      .from('indexed_events')
-      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
-
-    if (error) {
-      throw new Error(`Failed to upsert indexed events: ${error.message}`);
-    }
+    await this.#upsertInBatches(
+      'indexed_events',
+      rows,
+      'event_identity',
+      'Failed to upsert indexed events',
+    );
   }
 
   /**
@@ -204,15 +212,12 @@ export class IndexerDb {
    * state that belongs to reconciliation, not to discovery.
    */
   async upsertGroups(rows: readonly NewGroup[]): Promise<void> {
-    if (rows.length === 0) return;
-
-    const { error } = await this.#client
-      .from('groups')
-      .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
-
-    if (error) {
-      throw new Error(`Failed to upsert groups: ${error.message}`);
-    }
+    await this.#upsertInBatches(
+      'groups',
+      rows,
+      'contract_id',
+      'Failed to upsert groups',
+    );
   }
 
   /**
@@ -239,14 +244,35 @@ export class IndexerDb {
     rows: readonly object[],
     onConflict: string,
   ): Promise<void> {
-    if (rows.length === 0) return;
+    await this.#upsertInBatches(table, rows, onConflict, `Failed to record ${table}`);
+  }
 
-    const { error } = await this.#client
-      .from(table)
-      .upsert([...rows], { onConflict, ignoreDuplicates: true });
+  /**
+   * Upserts `rows` in sequential chunks of at most `#writeBatch` each, so no
+   * single PostgREST request carries more than the configured batch size.
+   *
+   * Batches run sequentially rather than concurrently: the point of the bound
+   * is a request that cannot outgrow its limits, and concurrent chunks would
+   * reintroduce the same total pressure on the connection. A failure on any
+   * batch throws immediately — earlier batches are idempotent upserts, so the
+   * caller's retry rewrites them harmlessly and the checkpoint is untouched
+   * until the whole write succeeds.
+   */
+  async #upsertInBatches(
+    table: string,
+    rows: readonly object[],
+    onConflict: string,
+    failure: string,
+  ): Promise<void> {
+    for (let c = 0; c < rows.length; c += this.#writeBatch) {
+      const chunk = rows.slice(c, c + this.#writeBatch);
+      const { error } = await this.#client
+        .from(table)
+        .upsert([...chunk], { onConflict, ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to record ${table}: ${error.message}`);
+      if (error) {
+        throw new Error(`${failure}: ${error.message}`);
+      }
     }
   }
 

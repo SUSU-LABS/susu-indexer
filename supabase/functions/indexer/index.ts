@@ -149,7 +149,8 @@ export async function handleRequest(
 
   const config = configResult.config;
 
-  const db = deps.db ?? new IndexerDb(config.supabaseUrl, config.serviceRoleKey);
+  const db = deps.db ?? new IndexerDb(
+    config.supabaseUrl, config.serviceRoleKey, undefined, config.writeBatch);
   const rpc = deps.rpc ?? new SorobanRpcClient(config.rpcUrl);
 
   // Hoisted out of the try so the catch block can report the ledger range the

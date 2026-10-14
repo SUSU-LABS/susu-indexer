@@ -32,6 +32,7 @@ Deno.test('accepts a valid configuration with sensible defaults', () => {
   assertEquals(result.ok, true);
   if (result.ok) {
     assertEquals(result.config.maxLedgersPerRun, 1000);
+    assertEquals(result.config.writeBatch, 500);
     assertEquals(result.config.startLedger, 1);
     assertEquals(result.config.allowMainnet, false);
     assertEquals(result.config.network, 'testnet');

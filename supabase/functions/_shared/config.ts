@@ -31,6 +31,8 @@ export type IndexerConfig = {
   startLedger: number;
   /** Maximum ledgers to process in a single invocation. */
   maxLedgersPerRun: number;
+  /** Maximum rows carried by a single PostgREST write. */
+  writeBatch: number;
   /** Safety switch for Mainnet, which is out of scope for the MVP. */
   allowMainnet: boolean;
 };
@@ -136,6 +138,11 @@ export function loadConfig(
     invalid.push('INDEXER_MAX_LEDGER_RANGE (must be an integer between 1 and 100000)');
   }
 
+  const writeBatch = readPositiveInt(env, 'INDEXER_WRITE_BATCH', 500);
+  if (!writeBatch.valid || writeBatch.value > 10_000) {
+    invalid.push('INDEXER_WRITE_BATCH (must be an integer between 1 and 10000)');
+  }
+
   const startLedger = readPositiveInt(env, 'INDEXER_START_LEDGER', 1);
   if (!startLedger.valid) {
     invalid.push('INDEXER_START_LEDGER (must be a positive integer)');
@@ -158,6 +165,7 @@ export function loadConfig(
       usdcContractId,
       startLedger: startLedger.value,
       maxLedgersPerRun: maxLedgers.value,
+      writeBatch: writeBatch.value,
       allowMainnet,
     },
   };
