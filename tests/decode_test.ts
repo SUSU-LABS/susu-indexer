@@ -8,7 +8,12 @@
  */
 
 import { assertEquals, assertNotEquals } from '@std/assert';
-import { decodeChainEvent, decodeChainEvents } from '../supabase/functions/_shared/decode.ts';
+import { xdr } from '@stellar/stellar-sdk';
+import {
+  CHAIN_EVENT_NAMES,
+  decodeChainEvent,
+  decodeChainEvents,
+} from '../supabase/functions/_shared/decode.ts';
 import type { RpcEvent } from '../supabase/functions/_shared/stellar.ts';
 import {
   allEvents,
@@ -26,7 +31,7 @@ Deno.test('every captured Testnet event decodes', () => {
 
   assertEquals(rejected, []);
   assertEquals(events.length, allEvents.length);
-  assertEquals(events.length, 26);
+  assertEquals(events.length, 29);
 });
 
 Deno.test('the captured events cover both contracts and their full vocabulary', () => {
@@ -37,10 +42,13 @@ Deno.test('the captured events cover both contracts and their full vocabulary', 
     'completed',
     'contribution',
     'fee',
+    'fee_updated',
     'group_created',
     'join',
+    'pause_updated',
     'payout',
     'start',
+    'treasury_updated',
   ]);
 
   const contracts = [...new Set(events.map((event) => event.contractId))].sort();
@@ -261,5 +269,124 @@ Deno.test('an event with missing or non-true successful flag is rejected', () =>
   assertEquals(result.ok, false);
   if (!result.ok) {
     assertEquals(result.reason.includes('unsuccessful contract call'), true);
+  }
+});
+
+Deno.test('fee_updated decodes the new protocol fee basis points', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'fee_updated');
+  if (event?.name !== 'fee_updated') throw new Error('no fee_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.name, 'fee_updated');
+  assertEquals(event.feeBps, 15);
+  assertEquals(typeof event.feeBps, 'number');
+
+  // Malformed variant: payload missing fee_bps or with non-integer fee_bps
+  const raw = factoryEvents.find((e) => decodeOk(e).name === 'fee_updated');
+  if (!raw) throw new Error('raw fee_updated missing');
+
+  const badMap = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('fee_bps'),
+      val: xdr.ScVal.scvSymbol('not_a_count'),
+    }),
+  ]).toXDR('base64');
+  const malformedType = { ...raw, value: badMap };
+  const res = decodeChainEvent(malformedType);
+  assertEquals(res.ok, false);
+  if (!res.ok) assertEquals(res.reason.includes('fee_updated payload is malformed'), true);
+});
+
+Deno.test('treasury_updated decodes the updated treasury address', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'treasury_updated');
+  if (event?.name !== 'treasury_updated') {
+    throw new Error('no treasury_updated event in the fixture');
+  }
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.name, 'treasury_updated');
+  assertEquals(event.treasury, 'GCKUC2KR7XBF3DFBFL472OM2V33OXF6I7NL3ZWWSUKR3N7AWBCYFQCCZ');
+  assertEquals(event.treasury.startsWith('G'), true);
+
+  // Malformed variant: topic 2 is not a valid address
+  const raw = factoryEvents.find((e) => decodeOk(e).name === 'treasury_updated');
+  if (!raw) throw new Error('raw treasury_updated missing');
+
+  const malformedTopic = {
+    ...raw,
+    topic: [raw.topic[0] as string, raw.topic[1] as string, symbolTopic('not_an_address')],
+  };
+  const res = decodeChainEvent(malformedTopic);
+  assertEquals(res.ok, false);
+  if (!res.ok) assertEquals(res.reason.includes('treasury_updated payload is malformed'), true);
+});
+
+Deno.test('pause_updated decodes the pause state boolean', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'pause_updated');
+  if (event?.name !== 'pause_updated') throw new Error('no pause_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  assertEquals(event.name, 'pause_updated');
+  assertEquals(event.paused, true);
+  assertEquals(typeof event.paused, 'boolean');
+
+  // Malformed variant: paused is not boolean
+  const raw = factoryEvents.find((e) => decodeOk(e).name === 'pause_updated');
+  if (!raw) throw new Error('raw pause_updated missing');
+
+  const badMap = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('paused'),
+      val: xdr.ScVal.scvU32(1),
+    }),
+  ]).toXDR('base64');
+  const malformedType = { ...raw, value: badMap };
+  const res = decodeChainEvent(malformedType);
+  assertEquals(res.ok, false);
+  if (!res.ok) assertEquals(res.reason.includes('pause_updated payload is malformed'), true);
+});
+
+Deno.test('topic count validation covers all ten ChainEventName values and fails on mismatch', () => {
+  assertEquals(CHAIN_EVENT_NAMES.length, 10);
+
+  const decodedMap = new Map<string, RpcEvent>();
+  for (const raw of allEvents) {
+    const res = decodeChainEvent(raw);
+    if (res.ok && !decodedMap.has(res.event.name)) {
+      decodedMap.set(res.event.name, raw);
+    }
+  }
+
+  assertEquals(decodedMap.size, 10);
+
+  for (const name of CHAIN_EVENT_NAMES) {
+    const raw = decodedMap.get(name);
+    if (!raw) throw new Error(`no fixture event found for ${name}`);
+
+    // Extra topic fails
+    const extraTopic = {
+      ...raw,
+      topic: [...raw.topic, symbolTopic('extra_topic')],
+    };
+    const resExtra = decodeChainEvent(extraTopic);
+    assertEquals(resExtra.ok, false);
+    if (!resExtra.ok) {
+      assertEquals(resExtra.reason.includes('expects'), true);
+      assertEquals(resExtra.reason.includes(name), true);
+    }
+
+    // Missing topic fails
+    if (raw.topic.length > 2) {
+      const missingTopic = {
+        ...raw,
+        topic: raw.topic.slice(0, raw.topic.length - 1),
+      };
+      const resMissing = decodeChainEvent(missingTopic);
+      assertEquals(resMissing.ok, false);
+      if (!resMissing.ok) {
+        assertEquals(resMissing.reason.includes('expects'), true);
+        assertEquals(resMissing.reason.includes(name), true);
+      }
+    }
   }
 });
