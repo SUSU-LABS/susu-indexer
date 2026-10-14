@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from '@std/assert';
-import { backoffDelay, withRetry } from '../supabase/functions/_shared/retry.ts';
+import { backoffDelay, isRetryableError, withRetry } from '../supabase/functions/_shared/retry.ts';
 
 /** Records delays instead of actually sleeping, so tests run instantly. */
 function recordingSleep(): { delays: number[]; sleep: (ms: number) => Promise<void> } {
@@ -112,4 +112,52 @@ Deno.test('withRetry rejects an invalid attempt budget', async () => {
     Error,
     'attempts >= 1',
   );
+});
+
+/** Runs `withRetry` against an error that never heals, and counts the attempts used. */
+async function attemptsFor(error: Error): Promise<number> {
+  const { sleep } = recordingSleep();
+  let calls = 0;
+
+  await assertRejects(
+    () =>
+      withRetry(
+        () => {
+          calls++;
+          return Promise.reject(error);
+        },
+        { attempts: 4, baseDelayMs: 10, maxDelayMs: 100, sleep, isRetryable: isRetryableError },
+      ),
+    Error,
+  );
+
+  return calls;
+}
+
+Deno.test('isRetryableError keeps the budget for network blips', () => {
+  assertEquals(isRetryableError(new TypeError('fetch failed')), true);
+  assertEquals(isRetryableError(new Error('Deadline exceeded while reading')), true);
+  assertEquals(isRetryableError(new Error('RPC request failed with status 503')), true);
+});
+
+Deno.test('isRetryableError spends one attempt on a rejected request', () => {
+  assertEquals(
+    isRetryableError(new Error('RPC error -32600: startLedger must be within the ledger range')),
+    false,
+  );
+  assertEquals(isRetryableError(new Error('RPC request failed with status 404')), false);
+});
+
+Deno.test('a transient failure uses the whole attempt budget', async () => {
+  assertEquals(await attemptsFor(new TypeError('fetch failed')), 4);
+});
+
+Deno.test('a deterministic rejection is attempted once', async () => {
+  const error = new Error('RPC error -32600: startLedger must be within the ledger range');
+  assertEquals(await attemptsFor(error), 1);
+});
+
+Deno.test('a constraint violation from a write is attempted once', async () => {
+  const error = new Error('duplicate key value violates unique constraint "events_pkey"');
+  assertEquals(await attemptsFor(error), 1);
 });
