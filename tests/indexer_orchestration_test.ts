@@ -70,6 +70,24 @@ class StubSupabaseClient {
     return new StubBuilder(this, table);
   }
 
+  /** Every Postgres function the handler invoked, in order. */
+  readonly rpcCalls: Array<{ fn: string; params: Record<string, unknown> }> = [];
+
+  /**
+   * The `derive_group_state` RPC that `readDerivedGroupState` calls. It answers
+   * with no rows: these tests assert on what the handler read, wrote and
+   * checkpointed, not on the aggregates, whose SQL is pinned by its own
+   * equivalence test. The call is recorded so a test can assert whether the
+   * reconcile path ran at all.
+   */
+  rpc(
+    fn: string,
+    params: Record<string, unknown>,
+  ): Promise<{ data: Record<string, unknown>[]; error: null }> {
+    this.rpcCalls.push({ fn, params });
+    return Promise.resolve({ data: [], error: null });
+  }
+
   rows(table: string): Row[] {
     let rows = this.tables.get(table);
     if (!rows) {
@@ -553,11 +571,19 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
     const body = await response.json();
     assertEquals(body.status, 'skipped');
 
-    // Nothing but the checkpoint read happened: no events, no writes.
+    // No events were read and nothing was indexed. The one write is the chain
+    // tip the run observed: `recordLatestLedger` keeps the lag alert's input
+    // fresh while the indexer is idle, so the checkpoint row is updated even
+    // on a skipped run.
     assertEquals(
       stub.calls.filter((call) => call.op !== 'select'),
-      [],
+      [{ table: 'indexer_checkpoints', op: 'update' }],
     );
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_seen_latest_ledger'],
+      SCENARIO_HEAD,
+    );
+    assertEquals(stub.rpcCalls, []);
     assertEquals(rpc.requests, []);
   } finally {
     restoreEnv();
