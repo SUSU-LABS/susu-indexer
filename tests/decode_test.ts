@@ -26,7 +26,7 @@ Deno.test('every captured Testnet event decodes', () => {
 
   assertEquals(rejected, []);
   assertEquals(events.length, allEvents.length);
-  assertEquals(events.length, 26);
+  assertEquals(events.length, 29);
 });
 
 Deno.test('the captured events cover both contracts and their full vocabulary', () => {
@@ -37,10 +37,13 @@ Deno.test('the captured events cover both contracts and their full vocabulary', 
     'completed',
     'contribution',
     'fee',
+    'fee_updated',
     'group_created',
     'join',
+    'pause_updated',
     'payout',
     'start',
+    'treasury_updated',
   ]);
 
   const contracts = [...new Set(events.map((event) => event.contractId))].sort();
@@ -59,6 +62,47 @@ Deno.test('group_created carries the creator, group, token and terms', () => {
   assertEquals(event.creator.startsWith('G'), true);
   assertEquals(event.group.startsWith('C'), true);
   assertEquals(event.token.startsWith('C'), true);
+});
+
+Deno.test('fee_updated decodes a basis-point count from the Factory', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'fee_updated');
+  if (event?.name !== 'fee_updated') throw new Error('no fee_updated event in the fixture');
+
+  assertEquals(event.contractId, FACTORY_ID);
+  // 25 bps is 0.25 %; a count must arrive as a number, not a symbol.
+  assertEquals(event.feeBps, 25);
+});
+
+Deno.test('treasury_updated reads the address from its topic, not its payload', () => {
+  const event = factoryEvents.map(decodeOk).find((e) => e.name === 'treasury_updated');
+  if (event?.name !== 'treasury_updated') {
+    throw new Error('no treasury_updated event in the fixture');
+  }
+
+  assertEquals(event.contractId, FACTORY_ID);
+  // The third topic is the ScVal holding the new treasury; the payload map only
+  // repeats it, and the topic is what the contracts actually key on.
+  assertEquals(event.treasury, 'GBPJ3JJLZ7XPV6CGF3ABPSTXAATKRBCU2L6P66LHCGLYPBVMJX5BEFH6');
+  assertEquals(event.treasury.startsWith('G'), true);
+});
+
+Deno.test('pause_updated decodes a real boolean rather than a count', () => {
+  const paused = factoryEvents.map(decodeOk).find((e) => e.name === 'pause_updated');
+  if (paused?.name !== 'pause_updated') throw new Error('no pause_updated event in the fixture');
+
+  assertEquals(paused.contractId, FACTORY_ID);
+  assertEquals(paused.paused, true);
+
+  // The same event with the flag cleared: both arms must survive the decoder,
+  // since a paused-then-resumed pair is the common sequence on chain.
+  const raw = factoryEvents.find((e) => e.topic[1] === symbolTopic('pause_updated'));
+  if (raw === undefined) throw new Error('no pause_updated event in the fixture');
+  const resumedEvent = decodeOk({
+    ...raw,
+    value: 'AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAA',
+  });
+  if (resumedEvent.name !== 'pause_updated') throw new Error('expected a pause_updated event');
+  assertEquals(resumedEvent.paused, false);
 });
 
 Deno.test('a contribution decodes its member, round and amount', () => {
@@ -180,6 +224,48 @@ Deno.test('a value that is not a map is rejected', () => {
   const result = decodeChainEvent(notAMap);
   assertEquals(result.ok, false);
   if (!result.ok) assertEquals(result.reason.includes('not a map'), true);
+});
+
+Deno.test('a config event whose payload disagrees with its contract is rejected', () => {
+  const feeUpdated = factoryEvents[6] as RpcEvent;
+  const treasuryUpdated = factoryEvents[7] as RpcEvent;
+  const pauseUpdated = factoryEvents[8] as RpcEvent;
+
+  // fee_bps as the symbol "25": a valid ScVal that is not a count.
+  const bpsResult = decodeChainEvent({
+    ...feeUpdated,
+    value: 'AAAAEQAAAAEAAAABAAAADwAAAAdmZWVfYnBzAAAAAA8AAAACMjUAAA==',
+  });
+  assertEquals(bpsResult.ok, false);
+  if (!bpsResult.ok) {
+    assertEquals(bpsResult.reason.includes('fee_updated payload is malformed'), true);
+  }
+
+  // treasury_updated with its address topic dropped: two topics where three are
+  // required, so the treasury would have to be guessed.
+  const missingAddress = { ...treasuryUpdated, topic: treasuryUpdated.topic.slice(0, 2) };
+  const treasuryResult = decodeChainEvent(missingAddress);
+  assertEquals(treasuryResult.ok, false);
+  if (!treasuryResult.ok) {
+    assertEquals(treasuryResult.reason.includes('treasury_updated expects 3 topics'), true);
+  }
+
+  // paused as the count 1 rather than a boolean: truthy coercion is not a flag.
+  const pausedAsCount = {
+    ...pauseUpdated,
+    value: 'AAAAEQAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAMAAAAB',
+  };
+  const pausedResult = decodeChainEvent(pausedAsCount);
+  assertEquals(pausedResult.ok, false);
+  if (!pausedResult.ok) {
+    assertEquals(pausedResult.reason.includes('pause_updated payload is malformed'), true);
+  }
+
+  // Sanity: the unmodified originals still decode, so a rejection above is
+  // about the payload and not about the fixture.
+  assertEquals(decodeOk(feeUpdated).name, 'fee_updated');
+  assertEquals(decodeOk(treasuryUpdated).name, 'treasury_updated');
+  assertEquals(decodeOk(pauseUpdated).name, 'pause_updated');
 });
 
 Deno.test('a rejected event does not discard the rest of its batch', () => {
