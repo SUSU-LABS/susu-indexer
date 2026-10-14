@@ -131,6 +131,22 @@ export function loadConfig(
     invalid.push('STELLAR_NETWORK=mainnet requires ALLOW_MAINNET=true (explicit approval)');
   }
 
+  // The passphrase is the network's identity on the wire: a value that does
+  // not match the declared network means the indexer decodes events from a
+  // chain it was never configured for. `local` is deliberately unchecked —
+  // standalone networks carry arbitrary passphrases.
+  const KNOWN_PASSPHRASES: Record<string, string> = {
+    testnet: 'Test SDF Network ; September 2015',
+    mainnet: 'Public Global Stellar Network ; September 2015',
+  };
+  const passphrase = values['STELLAR_NETWORK_PASSPHRASE'] as string;
+  const expectedPassphrase = KNOWN_PASSPHRASES[network];
+  if (expectedPassphrase !== undefined && passphrase !== expectedPassphrase) {
+    invalid.push(
+      'STELLAR_NETWORK_PASSPHRASE (does not match the declared STELLAR_NETWORK)',
+    );
+  }
+
   const maxLedgers = readPositiveInt(env, 'INDEXER_MAX_LEDGER_RANGE', 1000);
   if (!maxLedgers.valid || maxLedgers.value > 100_000) {
     invalid.push('INDEXER_MAX_LEDGER_RANGE (must be an integer between 1 and 100000)');

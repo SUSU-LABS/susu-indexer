@@ -90,13 +90,47 @@ Deno.test('refuses mainnet without explicit opt-in', () => {
 });
 
 Deno.test('allows mainnet with explicit opt-in', () => {
-  const result = loadConfig(validEnv({ STELLAR_NETWORK: 'mainnet', ALLOW_MAINNET: 'true' }));
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK: 'mainnet',
+    STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+    ALLOW_MAINNET: 'true',
+  }));
   assertEquals(result.ok, true);
   if (result.ok) assertEquals(result.config.allowMainnet, true);
 });
 
 Deno.test('rejects an unknown network', () => {
   assertEquals(loadConfig(validEnv({ STELLAR_NETWORK: 'futurenet' })).ok, false);
+});
+
+Deno.test('rejects a passphrase that does not match the declared network', () => {
+  // mainnet identity with the testnet network name: the indexer would decode
+  // events against a chain it was never configured for.
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK_PASSPHRASE: 'Public Global Stellar Network ; September 2015',
+  }));
+  assertEquals(result.ok, false);
+  if (!result.ok) {
+    assertEquals(
+      result.invalid.some((item) => item.includes('STELLAR_NETWORK_PASSPHRASE')),
+      true,
+    );
+  }
+});
+
+Deno.test('leaves the passphrase unchecked on local networks', () => {
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK: 'local',
+    STELLAR_NETWORK_PASSPHRASE: 'Standalone Network ; February 2017',
+  }));
+  assertEquals(result.ok, true);
+});
+
+Deno.test('rejects a quoted passphrase produced by the old deploy script', () => {
+  const result = loadConfig(validEnv({
+    STELLAR_NETWORK_PASSPHRASE: '"Test SDF Network ; September 2015"',
+  }));
+  assertEquals(result.ok, false);
 });
 
 Deno.test('accepts valid ledger budget and start ledger overrides', () => {
