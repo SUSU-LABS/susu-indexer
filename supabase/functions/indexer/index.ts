@@ -21,14 +21,20 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  type Checkpoint,
+  computeLedgerRange,
+  ledgerLag,
+  startLedgerGap,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
 import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
 import { planIngest } from '../_shared/ingest.ts';
-import { createLogger } from '../_shared/logger.ts';
+import { createLogger, type LogFields } from '../_shared/logger.ts';
 import { sanitizeErrorMessage } from '../_shared/sanitize.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { type EventSource, fetchRangeEvents } from '../_shared/scan.ts';
@@ -66,6 +72,8 @@ type RunSummary = {
   checkpoint?: number;
   lag?: number;
   reason?: string;
+  /** Conditions the run noticed and worked around; absent when there are none. */
+  warnings?: string[];
 };
 
 function jsonResponse(body: RunSummary, status: number): Response {
@@ -87,6 +95,57 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
     topic: [...event.topic],
     value: event.value,
   };
+}
+
+type RunWarning = { message: string; fields: LogFields };
+
+/**
+ * The warnings a run carries when a start ledger sits above its checkpoint.
+ *
+ * A start ledger raised above an existing checkpoint is never honoured: obeying
+ * it would skip every ledger in between, permanently and silently. Both places
+ * an operator can raise it are checked, because they fail differently. The
+ * checkpoint row's own `start_ledger` used to move the next range forward (the
+ * gap this guards against); `INDEXER_START_LEDGER` is not consulted once a
+ * checkpoint exists, which is just as surprising to whoever raised it expecting
+ * a jump. Each source that is ahead is named once, with the ledgers at stake.
+ * Moving to another ledger on purpose is the rebuild in `docs/RUNBOOK.md`.
+ */
+export function startLedgerWarnings(
+  checkpoint: Checkpoint,
+  configuredStartLedger: number,
+): RunWarning[] {
+  const sources = [
+    { source: 'indexer_checkpoints.start_ledger', startLedger: checkpoint.startLedger },
+  ];
+  if (configuredStartLedger !== checkpoint.startLedger) {
+    sources.push({ source: 'INDEXER_START_LEDGER', startLedger: configuredStartLedger });
+  }
+
+  const warnings: RunWarning[] = [];
+  for (const { source, startLedger } of sources) {
+    const gap = startLedgerGap({
+      lastProcessedLedger: checkpoint.lastProcessedLedger,
+      startLedger,
+    });
+    if (gap === null) continue;
+
+    warnings.push({
+      message: `${source} is ${gap.startLedger}, ahead of the checkpoint at ` +
+        `${checkpoint.lastProcessedLedger}; it was ignored and the run resumed at ` +
+        `${gap.resumeFrom}, so ledgers ${gap.skippedFrom}-${gap.skippedTo} were not skipped. ` +
+        'To index from a different ledger, follow the rebuild procedure in docs/RUNBOOK.md.',
+      fields: {
+        source,
+        startLedger: gap.startLedger,
+        lastProcessedLedger: checkpoint.lastProcessedLedger,
+        resumeFrom: gap.resumeFrom,
+        skippedFrom: gap.skippedFrom,
+        skippedTo: gap.skippedTo,
+      },
+    });
+  }
+  return warnings;
 }
 
 /**
@@ -161,6 +220,20 @@ export async function handleRequest(
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
     const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
 
+    // Said before the range is computed, and on every run while the condition
+    // holds: a start ledger above the checkpoint is a misconfiguration that
+    // someone expects to have taken effect, and a single log line at the time
+    // of the edit is easy to miss.
+    const warnings = checkpoint === undefined
+      ? []
+      : startLedgerWarnings(checkpoint, config.startLedger);
+    for (const warning of warnings) {
+      logger.warn('Start ledger ahead of the checkpoint was ignored', warning.fields);
+    }
+    const reported = warnings.length > 0 ? { warnings: warnings.map((w) => w.message) } : {};
+
+    // `startLedger` only matters on a first run; with a checkpoint the range
+    // resumes right after it, whatever either start ledger says.
     const range = computeLedgerRange({
       lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
       latestLedger,
@@ -180,6 +253,7 @@ export async function handleRequest(
           correlationId,
           checkpoint: checkpoint?.lastProcessedLedger,
           lag: ledgerLag(checkpoint, latestLedger),
+          ...reported,
         },
         200,
       );
@@ -326,6 +400,7 @@ export async function handleRequest(
         groupsDiscovered: newGroups.length,
         checkpoint: range.to,
         lag: Math.max(0, latestLedger - range.to),
+        ...reported,
       },
       200,
     );

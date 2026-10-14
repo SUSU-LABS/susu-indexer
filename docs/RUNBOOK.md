@@ -218,6 +218,22 @@ and follow its step 3 for any group created before the floor.
    preferred — the indexer repopulates all of them. Never truncate anything the contracts depend on;
    nothing off-chain is a dependency of the contracts.
 
+### Raising the start ledger does not skip ledgers
+
+A start ledger is honoured on the first run only. Once a checkpoint exists, every run resumes at
+`last_processed_ledger + 1`, whatever `INDEXER_START_LEDGER` or `indexer_checkpoints.start_ledger`
+says. Raising either above the checkpoint used to move the next range forward and leave every ledger
+in between unread: a permanent gap that nothing reported.
+
+A raised start ledger is now ignored and reported instead. The run logs
+`Start ledger ahead of the checkpoint was ignored`, naming the source, the ledgers it would have
+skipped and where the run resumed, and returns the same text in the `warnings` array of its
+response. The warning repeats on every run until the setting agrees with the checkpoint again.
+
+To index from a different ledger on purpose, use the [full rebuild](#full-rebuild): it sets
+`last_processed_ledger` to `start_ledger - 1` in the same statement, so the two agree and no ledger
+is skipped.
+
 ### The invocation secret is compromised
 
 1. Generate a new secret (`openssl rand -hex 32`).

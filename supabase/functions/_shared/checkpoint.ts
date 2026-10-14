@@ -39,6 +39,16 @@ export type LedgerRange = {
  * `startLedger`, which is the ledger the contracts were deployed at. On later
  * runs it resumes immediately after the checkpoint, so no ledger is skipped.
  *
+ * Once a checkpoint exists, `startLedger` is not consulted at all. It used to
+ * be: the range began at `max(lastProcessedLedger + 1, startLedger)`, so a
+ * start ledger raised above the checkpoint (in `INDEXER_START_LEDGER` or in
+ * `indexer_checkpoints.start_ledger`) moved the range forward and left every
+ * ledger in between unread, permanently and without a word. A raised start
+ * ledger is now ignored, and `startLedgerGap` tells the caller when that
+ * happened so the run can say so. Moving the indexer to another ledger on
+ * purpose is the rebuild in `docs/RUNBOOK.md`, which resets both columns
+ * together.
+ *
  * Returns `null` when the indexer is already caught up to the chain head.
  * Throws on invalid input rather than guessing — a bad range could skip ledgers.
  */
@@ -65,14 +75,47 @@ export function computeLedgerRange(params: {
     }
   }
 
-  const from = lastProcessedLedger === null
-    ? startLedger
-    : Math.max(lastProcessedLedger + 1, startLedger);
+  const from = lastProcessedLedger === null ? startLedger : lastProcessedLedger + 1;
 
   if (from > latestLedger) return null;
 
   const to = Math.min(latestLedger, from + maxRange - 1);
   return { from, to, truncated: to < latestLedger };
+}
+
+/** The ledgers a raised start ledger would have skipped, had it been honoured. */
+export type StartLedgerGap = {
+  /** The start ledger that was configured. */
+  startLedger: number;
+  /** Where the run resumes instead: immediately after the checkpoint. */
+  resumeFrom: number;
+  /** First ledger that would have been skipped (inclusive). */
+  skippedFrom: number;
+  /** Last ledger that would have been skipped (inclusive). */
+  skippedTo: number;
+};
+
+/**
+ * Detects a start ledger raised above an existing checkpoint.
+ *
+ * Returns `null` on a first run (there is no checkpoint to skip past), when the
+ * start ledger is at or below the resume point, and for the documented rebuild,
+ * which sets `last_processed_ledger` to `start_ledger - 1` so the two agree
+ * exactly. Otherwise it describes the gap that honouring the start ledger would
+ * have opened, so the caller can warn with the ledgers at stake rather than a
+ * bare "ignored".
+ */
+export function startLedgerGap(params: {
+  lastProcessedLedger: number | null;
+  startLedger: number;
+}): StartLedgerGap | null {
+  const { lastProcessedLedger, startLedger } = params;
+  if (lastProcessedLedger === null) return null;
+
+  const resumeFrom = lastProcessedLedger + 1;
+  if (startLedger <= resumeFrom) return null;
+
+  return { startLedger, resumeFrom, skippedFrom: resumeFrom, skippedTo: startLedger - 1 };
 }
 
 /**

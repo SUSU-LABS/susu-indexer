@@ -226,6 +226,10 @@ silently, since the run still succeeds.
 - **Full rebuild:** reset `indexer_checkpoints` to the later of the deployment ledger and the RPC's
   retention floor, then let the indexer re-scan. Event identity makes this safe. A start ledger
   below the retention floor fails every run instead of rebuilding — see `docs/RUNBOOK.md`.
+- **Raised start ledger:** once a checkpoint exists, neither `INDEXER_START_LEDGER` nor the
+  checkpoint row's `start_ledger` can move the next range forward. A value above the checkpoint is
+  ignored and reported in the run's log and response, so no ledger is skipped. Moving on purpose is
+  a rebuild: see `docs/RUNBOOK.md`.
 - **Groups missing from the index:** a group is only learned from the Factory's `group_created`
   event inside a range that is read. If that range was processed before group discovery existed, its
   events were never read and the checkpoint has moved past them — only a rebuild re-reads them.

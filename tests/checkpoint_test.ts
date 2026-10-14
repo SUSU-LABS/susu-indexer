@@ -4,6 +4,7 @@ import {
   type Checkpoint,
   computeLedgerRange,
   ledgerLag,
+  startLedgerGap,
 } from '../supabase/functions/_shared/checkpoint.ts';
 
 function checkpoint(lastProcessedLedger: number, startLedger = 1): Checkpoint {
@@ -134,6 +135,59 @@ Deno.test('computeLedgerRange rejects a negative checkpoint', () => {
       maxRange: 10,
     })
   );
+});
+
+// ---------------------------------------------------------------------------
+// A start ledger raised above the checkpoint
+// ---------------------------------------------------------------------------
+
+Deno.test('a start ledger raised above the checkpoint never moves the range forward', () => {
+  // Before: max(1099 + 1, 2000) = 2000, and ledgers 1100-1999 were never read.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 1099,
+      latestLedger: 5000,
+      startLedger: 2000,
+      maxRange: 100,
+    }),
+    { from: 1100, to: 1199, truncated: true },
+  );
+});
+
+Deno.test('a raised start ledger cannot make a caught-up indexer look behind', () => {
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 5000,
+      latestLedger: 5000,
+      startLedger: 9000,
+      maxRange: 100,
+    }),
+    null,
+  );
+});
+
+Deno.test('startLedgerGap names the ledgers a raised start ledger would have skipped', () => {
+  assertEquals(
+    startLedgerGap({ lastProcessedLedger: 1099, startLedger: 2000 }),
+    { startLedger: 2000, resumeFrom: 1100, skippedFrom: 1100, skippedTo: 1999 },
+  );
+  // Even one ledger ahead is a gap: resuming at 1101 would skip 1100.
+  assertEquals(
+    startLedgerGap({ lastProcessedLedger: 1099, startLedger: 1101 }),
+    { startLedger: 1101, resumeFrom: 1100, skippedFrom: 1100, skippedTo: 1100 },
+  );
+});
+
+Deno.test('startLedgerGap is silent on a first run', () => {
+  assertEquals(startLedgerGap({ lastProcessedLedger: null, startLedger: 2000 }), null);
+});
+
+Deno.test('startLedgerGap is silent for the documented rebuild and a lower start ledger', () => {
+  // The rebuild sets last_processed_ledger to start_ledger - 1: the two agree.
+  assertEquals(startLedgerGap({ lastProcessedLedger: 1999, startLedger: 2000 }), null);
+  // The steady state: the deployment ledger sits far below the checkpoint.
+  assertEquals(startLedgerGap({ lastProcessedLedger: 1099, startLedger: 1000 }), null);
+  assertEquals(startLedgerGap({ lastProcessedLedger: 1099, startLedger: 1100 }), null);
 });
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import { IndexerDb } from '../supabase/functions/_shared/db.ts';
 import {
   handleRequest,
   type RpcSource,
+  startLedgerWarnings,
   toIndexedRow,
 } from '../supabase/functions/indexer/index.ts';
 import type {
@@ -588,6 +589,145 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
   } finally {
     restoreEnv();
   }
+});
+
+// ---------------------------------------------------------------------------
+// A start ledger raised above the checkpoint
+// ---------------------------------------------------------------------------
+
+/** The first ledger the scripted RPC was asked to read, if a range scan ran at all. */
+function firstScanStart(rpc: ScriptedRpc): number | undefined {
+  const first = rpc.requests[0];
+  return first?.kind === 'range' ? first.startLedger : undefined;
+}
+
+/** A checkpoint row as an operator might leave it after editing it by hand. */
+function seedCheckpoint(
+  stub: StubSupabaseClient,
+  lastProcessedLedger: number,
+  startLedger: number,
+): void {
+  stub.rows('indexer_checkpoints').push({
+    id: 'default',
+    last_processed_ledger: lastProcessedLedger,
+    start_ledger: startLedger,
+    updated_at: '2026-10-01T00:00:00.000Z',
+  });
+}
+
+Deno.test('a start_ledger raised in the checkpoint row is ignored, reported, and skips nothing', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    // start_ledger was raised by 40 without resetting last_processed_ledger.
+    // The old range computation resumed at SCENARIO_FROM + 40 and never read
+    // the 30 ledgers in between.
+    seedCheckpoint(stub, SCENARIO_FROM + 9, SCENARIO_FROM + 40);
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+
+    // The run resumed right after the checkpoint, and that is what was read.
+    assertEquals(body.ledgerFrom, SCENARIO_FROM + 10);
+    assertEquals(firstScanStart(rpc), SCENARIO_FROM + 10);
+
+    // The operator is told which setting was ignored and which ledgers were
+    // at stake, in the response as well as in the log.
+    assertEquals(body.warnings.length, 1);
+    const warning: string = body.warnings[0];
+    assert(warning.includes('indexer_checkpoints.start_ledger'), warning);
+    assert(warning.includes(`${SCENARIO_FROM + 10}-${SCENARIO_FROM + 39}`), warning);
+    assert(warning.includes('docs/RUNBOOK.md'), warning);
+
+    // Indexing carried on: the checkpoint advanced to the chain head.
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a raised INDEXER_START_LEDGER has no effect once a checkpoint exists, and the run says so', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    // The checkpoint was built with a lower start ledger; the environment now
+    // carries SCENARIO_FROM (see withTestEnv), far above the resume point.
+    seedCheckpoint(stub, SCENARIO_FROM - 100, SCENARIO_FROM - 100);
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+    assertEquals(body.ledgerFrom, SCENARIO_FROM - 99);
+    assertEquals(firstScanStart(rpc), SCENARIO_FROM - 99);
+
+    assertEquals(body.warnings.length, 1);
+    const warning: string = body.warnings[0];
+    assert(warning.includes('INDEXER_START_LEDGER'), warning);
+    assert(warning.includes(`${SCENARIO_FROM - 99}-${SCENARIO_FROM - 1}`), warning);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('the documented rebuild raises no warning', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    // docs/RUNBOOK.md: last_processed_ledger = start_ledger - 1, both at once.
+    seedCheckpoint(stub, SCENARIO_FROM - 1, SCENARIO_FROM);
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'ok');
+    assertEquals(body.ledgerFrom, SCENARIO_FROM);
+    assertEquals(body.warnings, undefined);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('a caught-up run still reports a raised start ledger', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    seedCheckpoint(stub, SCENARIO_HEAD, SCENARIO_HEAD + 500);
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'skipped');
+    assertEquals(body.warnings.length, 1);
+    assertEquals(rpc.requests, []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('startLedgerWarnings names each raised source once', () => {
+  const checkpoint = {
+    lastProcessedLedger: 1099,
+    startLedger: 2000,
+    updatedAt: '2026-10-01T00:00:00.000Z',
+  };
+  const sources = (configured: number, current = checkpoint) =>
+    startLedgerWarnings(current, configured).map((warning) => warning.fields['source']);
+
+  // The row and the environment agree: one warning, not two.
+  assertEquals(sources(2000), ['indexer_checkpoints.start_ledger']);
+  // They disagree and both are ahead: both are named.
+  assertEquals(sources(3000), ['indexer_checkpoints.start_ledger', 'INDEXER_START_LEDGER']);
+  // Only the environment is ahead.
+  assertEquals(sources(3000, { ...checkpoint, startLedger: 1000 }), ['INDEXER_START_LEDGER']);
+  // Nothing is ahead: nothing to say.
+  assertEquals(sources(1000, { ...checkpoint, startLedger: 1000 }), []);
 });
 
 Deno.test('IndexerDb.getCheckpoint returns undefined when the indexer never ran', async () => {
