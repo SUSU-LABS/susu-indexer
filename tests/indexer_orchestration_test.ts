@@ -564,6 +564,70 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
   }
 });
 
+Deno.test('handleRequest ignores a checkpoint start_ledger raised past the checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps(groupEvents, SCENARIO_HEAD);
+    // The checkpoint row's start_ledger was raised past the checkpoint itself —
+    // the misconfiguration that used to compute from = max(checkpoint + 1,
+    // startLedger) and silently skip every ledger in between, forever.
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_FROM - 1,
+      startLedger: SCENARIO_HEAD + 5000,
+    });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    // Not skipped: the run resumed at the checkpoint and worked the range.
+    assertEquals(body.status, 'ok');
+    assertEquals(body.ledgerFrom, SCENARIO_FROM);
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+    assertEquals(
+      stub.rows('indexer_checkpoints')[0]?.['last_processed_ledger'],
+      SCENARIO_HEAD,
+    );
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest reports a tip below the checkpoint as tip_regression', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    const { stub, db, rpc } = makeDeps([], SCENARIO_HEAD);
+    // The checkpoint claims more than the provider's tip can account for: the
+    // RPC is lagging or on the wrong network.
+    const checkpointAhead = SCENARIO_HEAD + 50;
+    await db.advanceCheckpoint({
+      lastProcessedLedger: checkpointAhead,
+      startLedger: SCENARIO_FROM,
+    });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(response.status, 200);
+    const body = await response.json();
+    assertEquals(body.status, 'tip_regression');
+    assertEquals(body.checkpoint, checkpointAhead);
+    assertEquals(body.latestLedger, SCENARIO_HEAD);
+    assertEquals(body.behindBy, 50);
+
+    // Not "skipped": no events, no checkpoint movement, no failure row — the
+    // signal is the status itself, and the tip is deliberately not recorded
+    // (writing a below-checkpoint tip would zero the lag alert).
+    assertEquals(
+      stub.calls.filter((call) => call.op !== 'select'),
+      [],
+    );
+    assertEquals(rpc.requests, []);
+    assertEquals(stub.rows('indexer_runs'), []);
+  } finally {
+    restoreEnv();
+  }
+});
+
 Deno.test('IndexerDb.getCheckpoint returns undefined when the indexer never ran', async () => {
   const { db } = makeDeps([], SCENARIO_HEAD);
   assertEquals(await db.getCheckpoint(), undefined);

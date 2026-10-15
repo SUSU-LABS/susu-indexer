@@ -2,8 +2,10 @@ import { assertEquals, assertThrows } from '@std/assert';
 import {
   canAdvanceCheckpoint,
   type Checkpoint,
+  classifyEmptyRange,
   computeLedgerRange,
   ledgerLag,
+  startLedgerAheadOfCheckpoint,
 } from '../supabase/functions/_shared/checkpoint.ts';
 
 function checkpoint(lastProcessedLedger: number, startLedger = 1): Checkpoint {
@@ -90,6 +92,56 @@ Deno.test('a checkpoint ahead of the chain head returns no range', () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Empty-range classification
+// ---------------------------------------------------------------------------
+
+Deno.test('an empty range at the checkpoint is caught up, not a regression', () => {
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: 5000,
+      latestLedger: 5000,
+      startLedger: 1000,
+    }),
+    { kind: 'caught-up' },
+  );
+});
+
+Deno.test('a tip below the checkpoint is a tip regression with the distance', () => {
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: 6000,
+      latestLedger: 5900,
+      startLedger: 1000,
+    }),
+    { kind: 'tip-regression', behindBy: 100 },
+  );
+});
+
+Deno.test('a first-run tip below the deployment ledger is a tip regression', () => {
+  // No checkpoint yet, and the provider cannot even see the ledger the
+  // contracts were deployed at: wrong network or hopelessly stale.
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: null,
+      latestLedger: 400,
+      startLedger: 1000,
+    }),
+    { kind: 'tip-regression', behindBy: 599 },
+  );
+});
+
+Deno.test('a first-run tip at or above the deployment ledger is caught up', () => {
+  assertEquals(
+    classifyEmptyRange({
+      lastProcessedLedger: null,
+      latestLedger: 999,
+      startLedger: 1000,
+    }),
+    { kind: 'caught-up' },
+  );
+});
+
 Deno.test('the range never spans more than maxRange ledgers', () => {
   const range = computeLedgerRange({
     lastProcessedLedger: 10,
@@ -98,6 +150,58 @@ Deno.test('the range never spans more than maxRange ledgers', () => {
     maxRange: 25,
   });
   assertEquals((range?.to ?? 0) - (range?.from ?? 0) + 1, 25);
+});
+
+Deno.test('a raised start ledger does not skip past the checkpoint', () => {
+  // Raising startLedger (via the environment or the checkpoint row) while a
+  // checkpoint exists used to compute from = max(checkpoint + 1, startLedger),
+  // silently skipping everything in between. The checkpoint is the truth.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 1099,
+      latestLedger: 5000,
+      startLedger: 4000,
+      maxRange: 100,
+    }),
+    { from: 1100, to: 1199, truncated: true },
+  );
+});
+
+Deno.test('a rebuild-shaped checkpoint resumes at its start ledger', () => {
+  // The documented rebuild sets last_processed_ledger = start_ledger - 1, so
+  // the new start ledger takes effect through the checkpoint, not by being
+  // max()-ed into the range.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 3999,
+      latestLedger: 5000,
+      startLedger: 4000,
+      maxRange: 100,
+    }),
+    { from: 4000, to: 4099, truncated: true },
+  );
+});
+
+Deno.test('startLedgerAheadOfCheckpoint only fires when a checkpoint would be skipped', () => {
+  assertEquals(
+    startLedgerAheadOfCheckpoint({ lastProcessedLedger: null, startLedger: 9000 }),
+    false,
+    'first run: the start ledger is the source of truth',
+  );
+  assertEquals(
+    startLedgerAheadOfCheckpoint({ lastProcessedLedger: 1099, startLedger: 1200 }),
+    true,
+  );
+  assertEquals(
+    startLedgerAheadOfCheckpoint({ lastProcessedLedger: 1099, startLedger: 1100 }),
+    false,
+    'exactly checkpoint + 1 is the normal resume point',
+  );
+  assertEquals(
+    startLedgerAheadOfCheckpoint({ lastProcessedLedger: 1099, startLedger: 500 }),
+    false,
+    'a lower start ledger is harmless: the checkpoint still wins',
+  );
 });
 
 Deno.test('computeLedgerRange rejects invalid inputs', () => {
