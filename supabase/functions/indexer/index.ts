@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  computeLedgerRange,
+  isTipRegression,
+  ledgerLag,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -55,7 +60,7 @@ type RequestDependencies = {
 };
 
 type RunSummary = {
-  status: 'ok' | 'skipped' | 'failed';
+  status: 'ok' | 'skipped' | 'tip_regression' | 'failed';
   correlationId: string;
   ledgerFrom?: number;
   ledgerTo?: number;
@@ -169,14 +174,26 @@ export async function handleRequest(
     });
 
     if (range === null) {
-      logger.info('Nothing to index', { latestLedger });
+      const regression = isTipRegression({
+        lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
+        latestLedger,
+      });
+      const fields = {
+        latestLedger,
+        checkpoint: checkpoint?.lastProcessedLedger,
+      };
+      if (regression) {
+        logger.warn('Chain tip is behind the checkpoint', fields);
+      } else {
+        logger.info('Nothing to index', fields);
+      }
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the
       // indexer looks idle but healthy.
       await withRetry(() => db.recordLatestLedger(latestLedger), RETRY);
       return jsonResponse(
         {
-          status: 'skipped',
+          status: regression ? 'tip_regression' : 'skipped',
           correlationId,
           checkpoint: checkpoint?.lastProcessedLedger,
           lag: ledgerLag(checkpoint, latestLedger),

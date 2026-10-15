@@ -103,3 +103,21 @@ export function ledgerLag(
   if (current === undefined) return undefined;
   return Math.max(0, latestLedger - current.lastProcessedLedger);
 }
+
+/**
+ * True when the chain head is behind the checkpoint rather than equal to it.
+ *
+ * `computeLedgerRange` returns `null` for both "caught up" and "the tip is
+ * behind what we already indexed", and the two need different responses: one is
+ * an idle healthy run, the other says the node answered from a stale replica or
+ * the chain reorganised, so the next range may never include ledgers the
+ * checkpoint claims are done. This keeps that distinction without widening the
+ * range type every caller already unpacks.
+ */
+export function isTipRegression(params: {
+  lastProcessedLedger: number | null;
+  latestLedger: number;
+}): boolean {
+  if (params.lastProcessedLedger === null) return false;
+  return params.latestLedger < params.lastProcessedLedger;
+}

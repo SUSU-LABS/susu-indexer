@@ -3,6 +3,7 @@ import {
   canAdvanceCheckpoint,
   type Checkpoint,
   computeLedgerRange,
+  isTipRegression,
   ledgerLag,
 } from '../supabase/functions/_shared/checkpoint.ts';
 
@@ -88,6 +89,18 @@ Deno.test('a checkpoint ahead of the chain head returns no range', () => {
     }),
     null,
   );
+});
+
+Deno.test('an equal tip is an idle run, not a regression', () => {
+  assertEquals(isTipRegression({ lastProcessedLedger: 5000, latestLedger: 5000 }), false);
+});
+
+Deno.test('a chain head behind the checkpoint is a regression', () => {
+  assertEquals(isTipRegression({ lastProcessedLedger: 6000, latestLedger: 5000 }), true);
+});
+
+Deno.test('a first run with no checkpoint is never a regression', () => {
+  assertEquals(isTipRegression({ lastProcessedLedger: null, latestLedger: 5000 }), false);
 });
 
 Deno.test('the range never spans more than maxRange ledgers', () => {
