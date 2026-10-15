@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from '@std/assert';
+import { assert, assertEquals, assertRejects } from '@std/assert';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { IndexerDb } from '../supabase/functions/_shared/db.ts';
 import { deriveGroupState } from '../supabase/functions/_shared/state.ts';
@@ -183,4 +183,91 @@ Deno.test('readGroupState pages through stored group rows exceeding page size', 
   assertEquals(states.size, TOTAL_GROUPS);
   assertEquals(states.get(mockGroups[0]!.contract_id)?.status, 'open');
   assertEquals(states.get(mockGroups[2499]!.contract_id)?.contributed_total, '50000000');
+});
+
+/**
+ * Paging is only stable when the query carries an `ORDER BY`.
+ *
+ * The stub below mimics Postgres: rows come back in the order the query asked
+ * for, and an unordered read falls back to the planner's arbitrary order — a
+ * shuffled one here. With `pageSize` below the row count, an unordered read
+ * shows a row twice on adjacent pages and drops another, which is what the
+ * assertions pin down.
+ */
+Deno.test('readGroupFacts orders paged reads so every row is returned exactly once', async () => {
+  const contractId = 'C0000000000000000000000000000000000000000000000000000001';
+  const TOTAL = 2500;
+
+  // Stored in a shuffled order: an unordered read sees this permutation, and
+  // the pages slice straight into it.
+  const stored = Array.from({ length: TOTAL }, (_, i) => ({
+    contract_id: contractId,
+    event_identity: `E${String((i * 7919) % TOTAL).padStart(5, '0')}`,
+    round: (i % 10) + 1,
+    amount: '1000000',
+  }));
+
+  const orderedRanges: { table: string; cols: string[]; from: number; to: number }[] = [];
+
+  const stubClient = {
+    from(table: string) {
+      return {
+        select(_columns: string) {
+          return {
+            in(_column: string, _values: readonly string[]) {
+              const cols: string[] = [];
+              const builder = {
+                order(col: string, options: { ascending: boolean } | undefined) {
+                  cols.push(col);
+                  assertEquals(options?.ascending, true);
+                  return builder;
+                },
+                range(from: number, to: number) {
+                  orderedRanges.push({ table, cols: [...cols], from, to });
+                  const source = cols.length > 0
+                    ? [...stored].sort((a, b) => {
+                      for (const col of cols) {
+                        const left = String(a[col as keyof typeof a]);
+                        const right = String(b[col as keyof typeof b]);
+                        if (left !== right) return left < right ? -1 : 1;
+                      }
+                      return 0;
+                    })
+                    : stored;
+                  return Promise.resolve({
+                    data: table === 'contributions' ? source.slice(from, to + 1) : [],
+                    error: null,
+                  });
+                },
+              };
+              return builder;
+            },
+          };
+        },
+      };
+    },
+  } as unknown as SupabaseClient;
+
+  const db = new IndexerDb('https://example.supabase.co', 'dummy-key', stubClient);
+  const factsMap = await db.readGroupFacts([contractId], 1000);
+  const facts = factsMap.get(contractId);
+  if (!facts) throw new Error('facts missing for group');
+
+  // Every contribution is read exactly once across the three pages.
+  assertEquals(facts.contributions.length, TOTAL);
+
+  // Every paged read carries an ORDER BY, and it is the table's own key:
+  // contract_id plus a unique tiebreaker, applied before the range.
+  const contribRanges = orderedRanges.filter((r) => r.table === 'contributions');
+  assertEquals(contribRanges.length, 3);
+  assertEquals(contribRanges[0]?.cols, ['contract_id', 'event_identity']);
+  assertEquals(contribRanges[1]?.from, 1000);
+  assertEquals(contribRanges[2]?.from, 2000);
+  for (const range of orderedRanges) {
+    assert(range.cols.length > 0, `${range.table} is paged without an ORDER BY`);
+  }
+
+  // Derivation over the paged response is still exact: 2500 x 1000000.
+  const derived = deriveGroupState(contractId, facts);
+  assertEquals(derived.contributed_total, '2500000000');
 });

@@ -60,6 +60,30 @@ export type RejectedEventRow = {
   reason: string;
 };
 
+/**
+ * The `ORDER BY` each paged table needs, as a list of columns.
+ *
+ * Postgres only guarantees a stable row order across `OFFSET/LIMIT` pages when
+ * the query carries an `ORDER BY` that is unique per row. Every table
+ * `#selectIn` reads has one already: its primary key, prefixed with
+ * `contract_id` so the ordering also matches the `IN (...)` chunk being read.
+ * A tiebreaker that is not unique would let a concurrent insert move a row
+ * between two pages, which is the exact bug this list exists to avoid.
+ */
+const PAGE_ORDER: Record<string, string[]> = {
+  group_members: ['contract_id', 'member'],
+  contributions: ['contract_id', 'event_identity'],
+  payouts: ['contract_id', 'event_identity'],
+  protocol_fees: ['contract_id', 'event_identity'],
+  decoded_events: ['contract_id', 'event_identity'],
+  groups: ['contract_id'],
+};
+
+/** Columns to order a paged read by; `contract_id` is the fallback key. */
+function pageOrder(table: string): string[] {
+  return PAGE_ORDER[table] ?? ['contract_id'];
+}
+
 export class IndexerDb {
   #client: SupabaseClient;
 
@@ -488,12 +512,19 @@ export class IndexerDb {
           .select(columns)
           .in('contract_id', chunk);
 
-        const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
-          ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(
-            from,
-            to,
-          )
-          : selectQuery;
+        // Order before paging. Without a unique `ORDER BY`, Postgres may hand
+        // the same row back on two consecutive pages and omit a third, so a
+        // derived total would depend on how many rows a group happens to have.
+        type Builder = typeof selectQuery;
+        let orderedQuery: Builder = selectQuery;
+        for (const column of pageOrder(table)) {
+          const order = (orderedQuery as { order?: (c: string, o?: unknown) => Builder }).order;
+          if (typeof order !== 'function') break;
+          orderedQuery = order.call(orderedQuery, column, { ascending: true });
+        }
+
+        const paged = orderedQuery as { range?: (from: number, to: number) => Builder };
+        const pagedQuery = typeof paged.range === 'function' ? paged.range(from, to) : orderedQuery;
 
         const { data, error } = await pagedQuery;
 
@@ -506,7 +537,7 @@ export class IndexerDb {
           allRows.push(row);
         }
 
-        if (typeof (selectQuery as { range?: unknown }).range !== 'function') {
+        if (typeof paged.range !== 'function') {
           if (rows.length >= pageSize) {
             throw new Error(
               `Failed to read ${table}: returned ${rows.length} rows at server cap without pagination support`,
