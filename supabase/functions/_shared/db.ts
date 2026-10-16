@@ -32,6 +32,27 @@ type MutableFacts = {
   lastEventLedger: number;
 };
 
+/**
+ * Rows per upsert request.
+ *
+ * A single run covers at most `INDEXER_MAX_LEDGER_RANGE` ledgers, which is
+ * 1000 by default and can be raised to 100000, and one ledger can emit an event
+ * per group member. Handing all of that to one PostgREST `upsert` produces a
+ * body that the gateway can refuse on size and a statement long enough to be
+ * worth splitting, and a refused write means the whole range is re-read. The
+ * cap keeps every request roughly the size of one default range.
+ */
+export const WRITE_BATCH_SIZE = 1_000;
+
+/** Splits `rows` into consecutive chunks of at most `batchSize`. */
+function batches<T>(rows: readonly T[], batchSize: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < rows.length; i += batchSize) {
+    out.push(rows.slice(i, i + batchSize));
+  }
+  return out;
+}
+
 export type IndexedEventRow = {
   /** Chain-derived identity; unique, so replays never duplicate rows. */
   event_identity: string;
@@ -109,12 +130,14 @@ export class IndexerDb {
   async upsertEvents(rows: readonly IndexedEventRow[]): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('indexed_events')
-      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
+    for (const batch of batches(rows, WRITE_BATCH_SIZE)) {
+      const { error } = await this.#client
+        .from('indexed_events')
+        .upsert(batch, { onConflict: 'event_identity', ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      }
     }
   }
 
@@ -133,20 +156,22 @@ export class IndexerDb {
   ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('indexer_rejected_events')
-      .upsert(
-        // Truncated: reasons are short by construction, but never unbounded.
-        rows.map((row) => ({
-          ...row,
-          reason: row.reason.slice(0, 500),
-          correlation_id: correlationId,
-        })),
-        { onConflict: 'event_id', ignoreDuplicates: true },
-      );
+    for (const batch of batches(rows, WRITE_BATCH_SIZE)) {
+      const { error } = await this.#client
+        .from('indexer_rejected_events')
+        .upsert(
+          // Truncated: reasons are short by construction, but never unbounded.
+          batch.map((row) => ({
+            ...row,
+            reason: row.reason.slice(0, 500),
+            correlation_id: correlationId,
+          })),
+          { onConflict: 'event_id', ignoreDuplicates: true },
+        );
 
-    if (error) {
-      throw new Error(`Failed to persist rejected events: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to persist rejected events: ${error.message}`);
+      }
     }
   }
 
@@ -206,12 +231,14 @@ export class IndexerDb {
   async upsertGroups(rows: readonly NewGroup[]): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('groups')
-      .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
+    for (const batch of batches(rows, WRITE_BATCH_SIZE)) {
+      const { error } = await this.#client
+        .from('groups')
+        .upsert(batch, { onConflict: 'contract_id', ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to upsert groups: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to upsert groups: ${error.message}`);
+      }
     }
   }
 
@@ -241,12 +268,14 @@ export class IndexerDb {
   ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from(table)
-      .upsert([...rows], { onConflict, ignoreDuplicates: true });
+    for (const batch of batches(rows, WRITE_BATCH_SIZE)) {
+      const { error } = await this.#client
+        .from(table)
+        .upsert(batch, { onConflict, ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to record ${table}: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to record ${table}: ${error.message}`);
+      }
     }
   }
 
