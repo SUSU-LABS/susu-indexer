@@ -17,6 +17,32 @@ import type { IngestPlan } from './ingest.ts';
 import type { GroupFacts, GroupState, StoredGroupState } from './state.ts';
 
 /**
+ * Deterministic `ORDER BY` keys for the paged `#selectIn` readers, one entry
+ * per table. PostgREST without `ORDER BY` does not guarantee stable rows
+ * across `OFFSET`/`LIMIT` pages under concurrent writes, so an unordered
+ * `#selectIn` could silently skip or double-count rows once a group's facts
+ * exceed the page size. Every key starts with `contract_id` (the filter
+ * column, so each contract chunk's pages are stable) and ends in a key that
+ * is unique within a group — the schema guarantees these uniques:
+ * - `group_members`: `unique (contract_id, position)`
+ * - `contributions`: `unique (contract_id, round, member)`
+ * - `payouts` / `protocol_fees`: `unique (contract_id, round)`
+ * - `decoded_events`: `event_identity` is the primary key
+ * - `groups`: `contract_id` is the primary key (one row per group)
+ *
+ * An `ORDER BY` column need not appear in the `select` list, so these keys
+ * are valid even when the caller selects a narrower projection.
+ */
+const SELECT_IN_ORDERS: Record<string, readonly string[]> = {
+  group_members: ['contract_id', 'position'],
+  contributions: ['contract_id', 'round', 'member'],
+  payouts: ['contract_id', 'round'],
+  protocol_fees: ['contract_id', 'round'],
+  decoded_events: ['contract_id', 'event_identity'],
+  groups: ['contract_id'],
+};
+
+/**
  * Facts as they are accumulated while reading.
  *
  * The arrays are mutable so they can be pushed to; `GroupFacts` accepts them
@@ -488,12 +514,30 @@ export class IndexerDb {
           .select(columns)
           .in('contract_id', chunk);
 
-        const pagedQuery = typeof (selectQuery as { range?: unknown }).range === 'function'
-          ? (selectQuery as { range: (from: number, to: number) => typeof selectQuery }).range(
+        // Stable ordering before paging: without it, OFFSET/LIMIT pages are
+        // not guaranteed to be complete under concurrent writes. Applied only
+        // when the client supports ordering; the no-order fallback below keeps
+        // older stubs (which chain `.in().range()` directly) working, while
+        // the real client always carries the stable order.
+        let orderedQuery = selectQuery;
+        if (
+          typeof (selectQuery as { order?: unknown }).order === 'function'
+        ) {
+          for (const column of SELECT_IN_ORDERS[table] ?? ['contract_id']) {
+            orderedQuery = (
+              orderedQuery as unknown as {
+                order: (c: string, o: { ascending: boolean }) => typeof orderedQuery;
+              }
+            ).order(column, { ascending: true });
+          }
+        }
+
+        const pagedQuery = typeof (orderedQuery as { range?: unknown }).range === 'function'
+          ? (orderedQuery as { range: (from: number, to: number) => typeof orderedQuery }).range(
             from,
             to,
           )
-          : selectQuery;
+          : orderedQuery;
 
         const { data, error } = await pagedQuery;
 
@@ -506,7 +550,7 @@ export class IndexerDb {
           allRows.push(row);
         }
 
-        if (typeof (selectQuery as { range?: unknown }).range !== 'function') {
+        if (typeof (orderedQuery as { range?: unknown }).range !== 'function') {
           if (rows.length >= pageSize) {
             throw new Error(
               `Failed to read ${table}: returned ${rows.length} rows at server cap without pagination support`,
