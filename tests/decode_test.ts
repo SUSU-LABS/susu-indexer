@@ -9,6 +9,7 @@
 
 import { assertEquals, assertNotEquals } from '@std/assert';
 import { decodeChainEvent, decodeChainEvents } from '../supabase/functions/_shared/decode.ts';
+import { xdr } from '@stellar/stellar-sdk';
 import type { RpcEvent } from '../supabase/functions/_shared/stellar.ts';
 import {
   allEvents,
@@ -262,4 +263,57 @@ Deno.test('an event with missing or non-true successful flag is rejected', () =>
   if (!result.ok) {
     assertEquals(result.reason.includes('unsuccessful contract call'), true);
   }
+});
+
+/** Builds a synthetic Factory event — the fixture lacks the previous-value
+ * shapes the contracts now emit, so these are written by hand but decoded
+ * through the same byte path as the captured events. */
+function syntheticFeeEvent(
+  previousFeeBps: number,
+  feeBps: number,
+): RpcEvent {
+  const value = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('fee_bps'),
+      val: xdr.ScVal.scvU32(feeBps),
+    }),
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('previous_fee_bps'),
+      val: xdr.ScVal.scvU32(previousFeeBps),
+    }),
+  ]).toXDR('base64');
+  return {
+    ledger: 1,
+    txHash: 'deadbeef',
+    txIndex: 0,
+    eventIndex: 0,
+    id: 'a-0',
+    contractId: FACTORY_ID,
+    topic: [symbolTopic('susu'), symbolTopic('fee_updated')],
+    value,
+    successful: true,
+  };
+}
+
+Deno.test('fee_updated carries the previous and new fee', () => {
+  const result = decodeChainEvent(syntheticFeeEvent(5, 10));
+
+  assertEquals(result.ok, true);
+  if (result.ok && result.event.name === 'fee_updated') {
+    assertEquals(result.event.previousFeeBps, 5);
+    assertEquals(result.event.feeBps, 10);
+  }
+});
+
+Deno.test('fee_updated without the previous value is rejected', () => {
+  const value = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('fee_bps'),
+      val: xdr.ScVal.scvU32(10),
+    }),
+  ]).toXDR('base64');
+  const event = { ...syntheticFeeEvent(5, 10), value };
+
+  const result = decodeChainEvent(event);
+  assertEquals(result.ok, false);
 });

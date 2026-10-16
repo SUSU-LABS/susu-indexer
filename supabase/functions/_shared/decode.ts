@@ -92,8 +92,8 @@ export type DecodedChainEvent =
       contributionAmount: string;
       memberCapacity: number;
     }
-    | { name: 'fee_updated'; feeBps: number }
-    | { name: 'treasury_updated'; treasury: string }
+    | { name: 'fee_updated'; previousFeeBps: number; feeBps: number }
+    | { name: 'treasury_updated'; previousTreasury: string; treasury: string }
     | { name: 'pause_updated'; paused: boolean }
     | { name: 'join'; member: string; position: number }
     | { name: 'start'; memberCount: number }
@@ -261,15 +261,21 @@ export function decodeChainEvent(raw: RpcEvent): DecodeResult {
     }
 
     case 'fee_updated': {
+      const previousFeeBps = asCount(payload['previous_fee_bps']);
       const feeBps = asCount(payload['fee_bps']);
-      if (feeBps === undefined) return fail('fee_updated payload is malformed');
-      return { ok: true, event: { ...coordinates, name, feeBps } };
+      if (previousFeeBps === undefined || feeBps === undefined) {
+        return fail('fee_updated payload is malformed');
+      }
+      return { ok: true, event: { ...coordinates, name, previousFeeBps, feeBps } };
     }
 
     case 'treasury_updated': {
       const treasury = asAddress(rest[0]);
-      if (treasury === undefined) return fail('treasury_updated payload is malformed');
-      return { ok: true, event: { ...coordinates, name, treasury } };
+      const previousTreasury = asAddress(payload['previous_treasury']);
+      if (treasury === undefined || previousTreasury === undefined) {
+        return fail('treasury_updated payload is malformed');
+      }
+      return { ok: true, event: { ...coordinates, name, previousTreasury, treasury } };
     }
 
     case 'pause_updated': {
