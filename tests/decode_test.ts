@@ -263,3 +263,76 @@ Deno.test('an event with missing or non-true successful flag is rejected', () =>
     assertEquals(result.reason.includes('unsuccessful contract call'), true);
   }
 });
+
+Deno.test('factory_initialized decodes admin topic and config payload (susu-contracts #38)', async () => {
+  // The new FactoryInitialized event has no captured fixture yet — build the
+  // XDR the way the contractevent macro emits it: topics
+  // ["susu", "factory_initialized", admin], value a map of the rest.
+  const { Address, xdr } = await import('@stellar/stellar-sdk');
+  const adminAddress = 'GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ';
+  const treasuryAddress = 'GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI';
+  const wasmHash = new Uint8Array(32).fill(7);
+
+  const event: RpcEvent = {
+    contractId: FACTORY_ID,
+    ledger: 1,
+    txHash: 'test-hash',
+    txIndex: 0,
+    eventIndex: 0,
+    id: 'test-factory-init',
+    successful: true,
+    topic: [
+      symbolTopic('susu'),
+      symbolTopic('factory_initialized'),
+      new Address(adminAddress).toScVal().toXDR('base64'),
+    ],
+    value: xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol('treasury'),
+        val: new Address(treasuryAddress).toScVal(),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol('fee_bps'),
+        val: xdr.ScVal.scvU32(1000),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol('group_wasm_hash'),
+        val: xdr.ScVal.scvBytes(wasmHash),
+      }),
+    ]).toXDR('base64'),
+  };
+
+  const result = decodeChainEvent(event);
+  assertEquals(result.ok, true);
+  if (result.ok) {
+    const decoded = result.event;
+    assertEquals(decoded.name, 'factory_initialized');
+    if (decoded.name === 'factory_initialized') {
+      assertEquals(decoded.admin, adminAddress);
+      assertEquals(decoded.treasury, treasuryAddress);
+      assertEquals(decoded.feeBps, 1000);
+      assertEquals(decoded.groupWasmHash, '07'.repeat(32));
+    }
+  }
+
+  // A malformed payload (hash missing) rejects rather than guessing.
+  const malformed: RpcEvent = {
+    ...event,
+    id: 'test-factory-init-bad',
+    value: xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol('treasury'),
+        val: new Address(treasuryAddress).toScVal(),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol('fee_bps'),
+        val: xdr.ScVal.scvU32(1000),
+      }),
+    ]).toXDR('base64'),
+  };
+  const badResult = decodeChainEvent(malformed);
+  assertEquals(badResult.ok, false);
+  if (!badResult.ok) {
+    assertEquals(badResult.reason.includes('factory_initialized'), true);
+  }
+});

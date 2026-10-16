@@ -26,6 +26,7 @@ import type { RpcEvent } from './stellar.ts';
  * The first four come from the Factory, the rest from each Group contract.
  */
 export type ChainEventName =
+  | 'factory_initialized'
   | 'group_created'
   | 'fee_updated'
   | 'treasury_updated'
@@ -38,6 +39,7 @@ export type ChainEventName =
   | 'completed';
 
 export const CHAIN_EVENT_NAMES: readonly ChainEventName[] = [
+  'factory_initialized',
   'group_created',
   'fee_updated',
   'treasury_updated',
@@ -84,6 +86,14 @@ export type DecodedChainEvent =
   & EventCoordinates
   & (
     | {
+      name: 'factory_initialized';
+      admin: string;
+      treasury: string;
+      feeBps: number;
+      /** The group Wasm hash as a lowercase hex string. */
+      groupWasmHash: string;
+    }
+    | {
       name: 'group_created';
       creator: string;
       group: string;
@@ -118,6 +128,7 @@ export type RejectedChainEvent = EventCoordinates & { reason: string };
 
 /** How many topics each event is required to carry, including the namespace. */
 const TOPIC_COUNT: Record<ChainEventName, number> = {
+  factory_initialized: 3,
   group_created: 4,
   fee_updated: 2,
   treasury_updated: 3,
@@ -176,6 +187,17 @@ function asAmount(value: unknown): string | undefined {
   return value.toString();
 }
 
+/**
+ * Reads a `Bytes`/`BytesN` field and renders it as lowercase hex.
+ *
+ * `scValToNative` decodes `ScVal::Bytes` to `Uint8Array`; anything else means
+ * the field is not what we think it is.
+ */
+function asBytes(value: unknown): string | undefined {
+  if (!(value instanceof Uint8Array)) return undefined;
+  return [...value].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 /** Reads the value payload, which every event carries as a map. */
 function asPayload(value: unknown): Record<string, unknown> | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
@@ -231,6 +253,23 @@ export function decodeChainEvent(raw: RpcEvent): DecodeResult {
   };
 
   switch (name) {
+    case 'factory_initialized': {
+      const admin = asAddress(rest[0]);
+      const treasury = asAddress(payload['treasury']);
+      const feeBps = asCount(payload['fee_bps']);
+      const groupWasmHash = asBytes(payload['group_wasm_hash']);
+      if (
+        admin === undefined || treasury === undefined || feeBps === undefined ||
+        groupWasmHash === undefined
+      ) {
+        return fail('factory_initialized payload is malformed');
+      }
+      return {
+        ok: true,
+        event: { ...coordinates, name, admin, treasury, feeBps, groupWasmHash },
+      };
+    }
+
     case 'group_created': {
       const creator = asAddress(rest[0]);
       const group = asAddress(rest[1]);
