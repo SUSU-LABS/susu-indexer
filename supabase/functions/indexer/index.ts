@@ -1,5 +1,5 @@
 /**
- * Susu Protocol indexer — scheduled Supabase Edge Function.
+ * Susu Protocol indexer �� scheduled Supabase Edge Function.
  *
  * Invoked by Supabase Cron (or manually by an operator). It reads Soroban
  * contract events, records them idempotently, and advances a checkpoint.
@@ -21,7 +21,12 @@
  */
 
 import { authorizeInvocation } from '../_shared/auth.ts';
-import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
+import {
+  canAdvanceCheckpoint,
+  computeLedgerRange,
+  type LedgerRangeResult,
+  ledgerLag,
+} from '../_shared/checkpoint.ts';
 import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb, type RejectedEventRow } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
@@ -55,7 +60,7 @@ type RequestDependencies = {
 };
 
 type RunSummary = {
-  status: 'ok' | 'skipped' | 'failed';
+  status: 'ok' | 'skipped' | 'tip_regression' | 'failed';
   correlationId: string;
   ledgerFrom?: number;
   ledgerTo?: number;
@@ -139,7 +144,7 @@ export async function handleRequest(
     ? { ok: true as const, config: deps.config }
     : loadConfig(deps.env);
   if (!configResult.ok) {
-    // Report which variables are problematic — never their values.
+    // Report which variables are problematic �� never their values.
     const reason = `invalid configuration (missing: ${
       configResult.missing.join(', ') || 'none'
     }; invalid: ${configResult.invalid.join(', ') || 'none'})`;
@@ -161,14 +166,42 @@ export async function handleRequest(
     const checkpoint = await withRetry(() => db.getCheckpoint(), RETRY);
     const latestLedger = await withRetry(() => rpc.getLatestLedger(), RETRY);
 
-    const range = computeLedgerRange({
+    const result: LedgerRangeResult = computeLedgerRange({
       lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
       latestLedger,
       startLedger: checkpoint?.startLedger ?? config.startLedger,
       maxRange: config.maxLedgersPerRun,
     });
 
-    if (range === null) {
+    if (result.kind === 'tip_regression') {
+      // The reported chain head is behind the persisted checkpoint. The RPC
+      // endpoint is pointing at a lagging provider, the wrong network, or a
+      // checkpoint that was loaded from a more advanced chain. Indexing must
+      // not proceed: treating this as a healthy "skipped" run would mask the
+      // misconfiguration and leave the operator staring at an idle indexer
+      // while events are not being processed. Surface it loudly.
+      //
+      // `recordLatestLedger` is intentionally NOT called here: writing a tip
+      // that is behind the checkpoint would feed the lag alert a misleading
+      // "healthy" value and mask the regression further.
+      logger.warn('Chain tip is behind the persisted checkpoint', {
+        latestLedger,
+        lastProcessedLedger: checkpoint?.lastProcessedLedger ?? null,
+        startLedger: checkpoint?.startLedger ?? config.startLedger,
+      });
+      return jsonResponse(
+        {
+          status: 'tip_regression',
+          correlationId,
+          checkpoint: checkpoint?.lastProcessedLedger,
+          lag: ledgerLag(checkpoint, latestLedger),
+          reason: 'chain tip is behind the persisted checkpoint',
+        },
+        500,
+      );
+    }
+
+    if (result.kind === 'caught_up') {
       logger.info('Nothing to index', { latestLedger });
       // The tip was still observed. Without this write the lag alert's input
       // freezes at the last indexing run and goes stale exactly when the
@@ -184,6 +217,9 @@ export async function handleRequest(
         200,
       );
     }
+
+    // result.kind === 'range' — the only branch that proceeds to indexing.
+    const range = result.range;
 
     failedRange = { from: range.from, to: range.to };
 
@@ -261,8 +297,8 @@ export async function handleRequest(
     }
 
     // Persist every rejection before the checkpoint can move. A decoder miss is
-    // the highest-consequence silent failure — it can hide a real contribution
-    // or payout — so it is written durably (and alerted on by the health check)
+    // the highest-consequence silent failure �� it can hide a real contribution
+    // or payout �� so it is written durably (and alerted on by the health check)
     // rather than left as a truncated log line.
     const rejectedRows: RejectedEventRow[] = rejected.map((item) => ({
       event_id: item.eventId,

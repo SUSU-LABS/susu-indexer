@@ -33,21 +33,48 @@ export type LedgerRange = {
 };
 
 /**
+ * Discriminated union of every state `computeLedgerRange` can report.
+ *
+ * `tip_regression` is the case the indexer must surface to operators: the
+ * reported chain head is *behind* the persisted checkpoint, which means
+ * either the RPC endpoint is pointing at a lagging/wrong network, or the
+ * checkpoint was loaded from a more advanced chain. Either way, indexing
+ * must stop until the operator investigates — a "skip" here would mask
+ * the misconfiguration and look healthy forever.
+ */
+export type LedgerRangeResult =
+  | { kind: 'range'; range: LedgerRange }
+  | { kind: 'caught_up' }
+  | { kind: 'tip_regression' };
+
+/**
  * Computes the next ledger range to process.
  *
  * On a first run (`lastProcessedLedger === null`) indexing begins at
  * `startLedger`, which is the ledger the contracts were deployed at. On later
  * runs it resumes immediately after the checkpoint, so no ledger is skipped.
  *
- * Returns `null` when the indexer is already caught up to the chain head.
- * Throws on invalid input rather than guessing — a bad range could skip ledgers.
+ * Three outcomes, distinguished so the caller cannot accidentally treat a
+ * misconfigured RPC endpoint as a healthy idle:
+ *
+ * - `range`       — there is work to do; index `range.from`..`range.to`.
+ * - `caught_up`   — `from === latestLedger + 1`; the indexer is healthy and
+ *                   idle (or, on a first run, the deployment ledger has not
+ *                   been reached yet).
+ * - `tip_regression` — `latestLedger < lastProcessedLedger`; the reported
+ *                   chain head is behind the persisted checkpoint. The
+ *                   caller MUST surface this; it is a misconfiguration, not
+ *                   an idle.
+ *
+ * Throws on invalid input rather than guessing — a bad range could skip
+ * ledgers.
  */
 export function computeLedgerRange(params: {
   lastProcessedLedger: number | null;
   latestLedger: number;
   startLedger: number;
   maxRange: number;
-}): LedgerRange | null {
+}): LedgerRangeResult {
   const { lastProcessedLedger, latestLedger, startLedger, maxRange } = params;
 
   if (!Number.isSafeInteger(latestLedger) || latestLedger < 0) {
@@ -69,10 +96,22 @@ export function computeLedgerRange(params: {
     ? startLedger
     : Math.max(lastProcessedLedger + 1, startLedger);
 
-  if (from > latestLedger) return null;
+  if (from > latestLedger) {
+    // `from > latestLedger` covers two distinct cases. The caller's response
+    // must differ: a tip regression is a misconfiguration that has to be
+    // surfaced, while a genuine catch-up is the normal idle state.
+    const isRegression = lastProcessedLedger !== null &&
+      latestLedger < lastProcessedLedger;
+    return isRegression
+      ? { kind: 'tip_regression' }
+      : { kind: 'caught_up' };
+  }
 
   const to = Math.min(latestLedger, from + maxRange - 1);
-  return { from, to, truncated: to < latestLedger };
+  return {
+    kind: 'range',
+    range: { from, to, truncated: to < latestLedger },
+  };
 }
 
 /**

@@ -1,7 +1,7 @@
 /**
  * Orchestration tests: the request handler and the database layer.
  *
- * `tests/` previously covered pure modules only — there was no reference to
+ * `tests/` previously covered pure modules only �� there was no reference to
  * `db.ts`, `index.ts`, `handleRequest`, `IndexerDb`, `toIndexedRow` or
  * `advanceCheckpoint`. These tests drive the full two-pass flow
  * (range -> decode -> discover -> second pass -> persist -> reconcile ->
@@ -51,9 +51,9 @@ type StubCall = {
 /**
  * A Supabase client stub with in-memory tables.
  *
- * Implements exactly the PostgREST chains `IndexerDb` uses — select with
+ * Implements exactly the PostgREST chains `IndexerDb` uses �� select with
  * eq/in/maybeSingle, upsert with onConflict/ignoreDuplicates, insert, and
- * update with an exact count — and records every executed operation so tests
+ * update with an exact count �� and records every executed operation so tests
  * can assert on what the handler did, not just what it returned. Anything
  * else the real client can do is out of scope; the cast at the injection
  * site is the honest marker of that boundary.
@@ -559,6 +559,50 @@ Deno.test('handleRequest skips a range the checkpoint already covers', async () 
       [],
     );
     assertEquals(rpc.requests, []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+Deno.test('handleRequest reports tip_regression when the chain head is behind the checkpoint', async () => {
+  const restoreEnv = withTestEnv();
+  try {
+    // The checkpoint says the indexer has already processed SCENARIO_HEAD,
+    // but the RPC endpoint reports a head that is *behind* it. This is the
+    // case the misconfiguration guard must surface: a healthy indexer pointed
+    // at a lagging provider would otherwise look idle forever.
+    const laggingHead = SCENARIO_HEAD - 100;
+    const { stub, db, rpc } = makeDeps([], laggingHead);
+    await db.advanceCheckpoint({
+      lastProcessedLedger: SCENARIO_HEAD,
+      startLedger: SCENARIO_FROM,
+    });
+    stub.calls.length = 0;
+
+    const response = await handleRequest(authorizedRequest(), { db, rpc });
+    assertEquals(
+      response.status,
+      500,
+      'a tip behind the checkpoint must surface as 5xx so the operator notices',
+    );
+    const body = await response.json();
+    assertEquals(body.status, 'tip_regression');
+    assertEquals(
+      body.reason,
+      'chain tip is behind the persisted checkpoint',
+    );
+    assertEquals(body.checkpoint, SCENARIO_HEAD);
+
+    // The RPC must not be queried for events: the indexer must not start
+    // scanning a range that is already in the past.
+    assertEquals(rpc.requests, []);
+
+    // The only write attempted is the checkpoint read; the regression path
+    // must NOT advance or touch the checkpoint, and must NOT record the
+    // (lower) latest ledger — doing so would feed the lag alert a misleading
+    // healthy value and mask the regression.
+    const writes = stub.calls.filter((call) => call.op !== 'select');
+    assertEquals(writes, []);
   } finally {
     restoreEnv();
   }

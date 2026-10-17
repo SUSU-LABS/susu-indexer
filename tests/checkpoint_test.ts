@@ -3,6 +3,7 @@ import {
   canAdvanceCheckpoint,
   type Checkpoint,
   computeLedgerRange,
+  type LedgerRangeResult,
   ledgerLag,
 } from '../supabase/functions/_shared/checkpoint.ts';
 
@@ -22,7 +23,7 @@ Deno.test('a first run starts at the configured deployment ledger', () => {
       startLedger: 1000,
       maxRange: 100,
     }),
-    { from: 1000, to: 1099, truncated: true },
+    { kind: 'range', range: { from: 1000, to: 1099, truncated: true } },
   );
 });
 
@@ -34,7 +35,7 @@ Deno.test('a resumed run continues immediately after the checkpoint', () => {
       startLedger: 1000,
       maxRange: 100,
     }),
-    { from: 1100, to: 1199, truncated: true },
+    { kind: 'range', range: { from: 1100, to: 1199, truncated: true } },
   );
 });
 
@@ -46,12 +47,15 @@ Deno.test('no ledger is ever skipped between consecutive runs', () => {
     maxRange: 250,
   });
   const second = computeLedgerRange({
-    lastProcessedLedger: first?.to ?? null,
+    lastProcessedLedger: first.kind === 'range' ? first.range.to : null,
     latestLedger: 10_000,
     startLedger: 500,
     maxRange: 250,
   });
-  assertEquals(second?.from, (first?.to ?? 0) + 1);
+  if (first.kind !== 'range' || second.kind !== 'range') {
+    throw new Error('expected both runs to return a range');
+  }
+  assertEquals(second.range.from, first.range.to + 1);
 });
 
 Deno.test('the range is capped at the chain head and not marked truncated', () => {
@@ -62,11 +66,11 @@ Deno.test('the range is capped at the chain head and not marked truncated', () =
       startLedger: 1000,
       maxRange: 100,
     }),
-    { from: 4991, to: 5000, truncated: false },
+    { kind: 'range', range: { from: 4991, to: 5000, truncated: false } },
   );
 });
 
-Deno.test('a caught-up indexer returns no range', () => {
+Deno.test('a caught-up indexer with a checkpoint reports caught_up', () => {
   assertEquals(
     computeLedgerRange({
       lastProcessedLedger: 5000,
@@ -74,11 +78,28 @@ Deno.test('a caught-up indexer returns no range', () => {
       startLedger: 1000,
       maxRange: 100,
     }),
-    null,
+    { kind: 'caught_up' },
   );
 });
 
-Deno.test('a checkpoint ahead of the chain head returns no range', () => {
+Deno.test('a first run before the deployment ledger reports caught_up (deferred start)', () => {
+  // No checkpoint yet and the chain head has not reached the deployment
+  // ledger. There is nothing to do, and the operator has not misconfigured
+  // anything: the contracts are simply not live yet.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: null,
+      latestLedger: 50,
+      startLedger: 1000,
+      maxRange: 100,
+    }),
+    { kind: 'caught_up' },
+  );
+});
+
+Deno.test('a checkpoint ahead of the chain head reports tip_regression', () => {
+  // The reported chain head is BEHIND the persisted checkpoint. This is the
+  // case the indexer must surface, not silently skip.
   assertEquals(
     computeLedgerRange({
       lastProcessedLedger: 6000,
@@ -86,18 +107,52 @@ Deno.test('a checkpoint ahead of the chain head returns no range', () => {
       startLedger: 1000,
       maxRange: 100,
     }),
-    null,
+    { kind: 'tip_regression' },
+  );
+});
+
+Deno.test('a tip that is one ledger behind the checkpoint reports tip_regression', () => {
+  // `from > latestLedger` covers both `from === latestLedger + 1` (caught up)
+  // and `from > latestLedger + 1` (regression). The threshold is a regression
+  // as soon as the tip is strictly below the checkpoint, not below
+  // `checkpoint - 1`.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: 5001,
+      latestLedger: 5000,
+      startLedger: 1000,
+      maxRange: 100,
+    }),
+    { kind: 'tip_regression' },
+  );
+});
+
+Deno.test('a first run with a tip behind startLedger is caught_up, not tip_regression', () => {
+  // No checkpoint exists, so there is nothing to regress against. The
+  // deployment ledger is simply in the future; this is the same kind of
+  // "nothing to do" as a healthy catch-up.
+  assertEquals(
+    computeLedgerRange({
+      lastProcessedLedger: null,
+      latestLedger: 999,
+      startLedger: 1000,
+      maxRange: 100,
+    }),
+    { kind: 'caught_up' },
   );
 });
 
 Deno.test('the range never spans more than maxRange ledgers', () => {
-  const range = computeLedgerRange({
+  const result: LedgerRangeResult = computeLedgerRange({
     lastProcessedLedger: 10,
     latestLedger: 100_000,
     startLedger: 1,
     maxRange: 25,
   });
-  assertEquals((range?.to ?? 0) - (range?.from ?? 0) + 1, 25);
+  if (result.kind !== 'range') {
+    throw new Error('expected a range result');
+  }
+  assertEquals(result.range.to - result.range.from + 1, 25);
 });
 
 Deno.test('computeLedgerRange rejects invalid inputs', () => {
