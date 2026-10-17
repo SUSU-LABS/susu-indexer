@@ -3,6 +3,7 @@ import {
   canAdvanceCheckpoint,
   type Checkpoint,
   computeLedgerRange,
+  isTipRegression,
   ledgerLag,
 } from '../supabase/functions/_shared/checkpoint.ts';
 
@@ -176,4 +177,44 @@ Deno.test('ledgerLag reports the distance from the chain tip', () => {
 
 Deno.test('ledgerLag never reports a negative lag', () => {
   assertEquals(ledgerLag(checkpoint(110), 100), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Tip regression detection
+// ---------------------------------------------------------------------------
+
+Deno.test('isTipRegression returns false when tip matches or exceeds checkpoint', () => {
+  assertEquals(
+    isTipRegression({ lastProcessedLedger: 5000, startLedger: 1000, latestLedger: 5000 }),
+    { isRegression: false, behindBy: 0 },
+  );
+  assertEquals(
+    isTipRegression({ lastProcessedLedger: 5000, startLedger: 1000, latestLedger: 5010 }),
+    { isRegression: false, behindBy: 0 },
+  );
+});
+
+Deno.test('isTipRegression detects regression when tip falls strictly behind checkpoint', () => {
+  assertEquals(
+    isTipRegression({ lastProcessedLedger: 5000, startLedger: 1000, latestLedger: 4995 }),
+    { isRegression: true, behindBy: 5 },
+  );
+});
+
+Deno.test('isTipRegression on first run returns false when tip matches or exceeds startLedger', () => {
+  assertEquals(
+    isTipRegression({ lastProcessedLedger: null, startLedger: 1000, latestLedger: 1000 }),
+    { isRegression: false, behindBy: 0 },
+  );
+  assertEquals(
+    isTipRegression({ lastProcessedLedger: null, startLedger: 1000, latestLedger: 1200 }),
+    { isRegression: false, behindBy: 0 },
+  );
+});
+
+Deno.test('isTipRegression on first run detects regression when tip is behind startLedger', () => {
+  assertEquals(
+    isTipRegression({ lastProcessedLedger: null, startLedger: 1000, latestLedger: 950 }),
+    { isRegression: true, behindBy: 50 },
+  );
 });

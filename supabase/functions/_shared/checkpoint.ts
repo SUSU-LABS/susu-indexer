@@ -103,3 +103,26 @@ export function ledgerLag(
   if (current === undefined) return undefined;
   return Math.max(0, latestLedger - current.lastProcessedLedger);
 }
+
+export type TipRegression = {
+  isRegression: boolean;
+  behindBy: number;
+};
+
+/**
+ * Detects whether the observed chain tip has regressed behind the checkpoint
+ * (or behind the initial start ledger if no checkpoint exists yet).
+ */
+export function isTipRegression(params: {
+  lastProcessedLedger: number | null;
+  startLedger: number;
+  latestLedger: number;
+}): TipRegression {
+  const reference = params.lastProcessedLedger !== null
+    ? params.lastProcessedLedger
+    : params.startLedger;
+  if (params.latestLedger < reference) {
+    return { isRegression: true, behindBy: reference - params.latestLedger };
+  }
+  return { isRegression: false, behindBy: 0 };
+}
