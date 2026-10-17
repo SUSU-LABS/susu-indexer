@@ -147,7 +147,10 @@ export class SorobanRpcClient {
     const payload = (await response.json()) as JsonRpcResponse<T>;
 
     if (payload.error) {
-      throw new RpcError(`RPC error ${payload.error.code}: ${payload.error.message}`);
+      throw new RpcError(
+        `RPC error ${payload.error.code}: ${payload.error.message}`,
+        payload.error.code,
+      );
     }
 
     if (payload.result === undefined) {

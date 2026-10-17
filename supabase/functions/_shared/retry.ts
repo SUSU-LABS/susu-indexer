@@ -60,3 +60,55 @@ export async function withRetry<T>(
   // Unreachable: the loop either returns or throws.
   throw lastError;
 }
+
+/**
+ * Classifies an error as transient (retryable) or deterministic (non-retryable).
+ *
+ * Deterministic errors (such as JSON-RPC -32600 startLedger out-of-range, HTTP 4xx,
+ * and PostgreSQL constraint violations) fail immediately on attempt 1 without
+ * burning backoff delay or RPC quota.
+ */
+export function isRetryableError(error: unknown): boolean {
+  if (error === null || error === undefined) return false;
+
+  const err = error as {
+    status?: number;
+    message?: string;
+  };
+
+  const status = typeof err.status === 'number' ? err.status : undefined;
+  if (status !== undefined) {
+    // Transient HTTP codes
+    if (status === 408 || status === 429 || (status >= 500 && status < 600)) {
+      return true;
+    }
+    // Client error HTTP codes (400, 401, 403, 404, etc.)
+    if (status >= 400 && status < 500) {
+      return false;
+    }
+    // Deterministic JSON-RPC codes: Parse error, Invalid Request, Method not found, Invalid params
+    if (status === -32700 || status === -32600 || status === -32601 || status === -32602) {
+      return false;
+    }
+    // JSON-RPC server-defined implementation errors (-32000 to -32099) or -32603 internal error
+    if ((status <= -32000 && status >= -32099) || status === -32603) {
+      return true;
+    }
+  }
+
+  const message = typeof err.message === 'string' ? err.message : String(error);
+
+  // Deterministic Postgres constraint violations
+  if (
+    message.includes('violates unique constraint') ||
+    message.includes('violates foreign key constraint') ||
+    message.includes('violates check constraint') ||
+    message.includes('violates not-null constraint') ||
+    message.includes('duplicate key value')
+  ) {
+    return false;
+  }
+
+  // Network / fetch / timeout errors are transient
+  return true;
+}
