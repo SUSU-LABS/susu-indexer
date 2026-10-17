@@ -13,6 +13,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Checkpoint } from './checkpoint.ts';
 import type { NewGroup } from './discovery.ts';
+export type { NewGroup };
 import type { IngestPlan } from './ingest.ts';
 import type { GroupFacts, GroupState, StoredGroupState } from './state.ts';
 
@@ -60,19 +61,48 @@ export type RejectedEventRow = {
   reason: string;
 };
 
+/**
+ * Default maximum number of rows sent in a single PostgREST upsert/insert request.
+ *
+ * Keeps payload size well within PostgREST/PostgreSQL limits and prevents unbounded
+ * memory and statement execution issues during large ledger intervals.
+ */
+export const WRITE_BATCH_SIZE = 1000;
+
+/**
+ * Splits an array of rows into bounded chunks.
+ */
+export function batches<T>(rows: readonly T[], size: number = WRITE_BATCH_SIZE): T[][] {
+  if (size <= 0) {
+    throw new RangeError(`Batch size must be greater than 0, got ${size}`);
+  }
+  const result: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) {
+    result.push(rows.slice(i, i + size));
+  }
+  return result;
+}
+
 export class IndexerDb {
   #client: SupabaseClient;
+  #batchSize: number;
 
   /**
    * An explicit client may be injected for tests, so the orchestration can be
    * exercised against a stub instead of a live database. Production callers
    * omit it and get the service-role client as before.
    */
-  constructor(supabaseUrl: string, serviceRoleKey: string, client?: SupabaseClient) {
+  constructor(
+    supabaseUrl: string,
+    serviceRoleKey: string,
+    client?: SupabaseClient,
+    batchSize: number = WRITE_BATCH_SIZE,
+  ) {
     this.#client = client ??
       createClient(supabaseUrl, serviceRoleKey, {
         auth: { persistSession: false, autoRefreshToken: false },
       });
+    this.#batchSize = batchSize;
   }
 
   /**
@@ -109,12 +139,14 @@ export class IndexerDb {
   async upsertEvents(rows: readonly IndexedEventRow[]): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('indexed_events')
-      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
+    for (const chunk of batches(rows, this.#batchSize)) {
+      const { error } = await this.#client
+        .from('indexed_events')
+        .upsert([...chunk], { onConflict: 'event_identity', ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to upsert indexed events: ${error.message}`);
+      }
     }
   }
 
@@ -133,20 +165,22 @@ export class IndexerDb {
   ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('indexer_rejected_events')
-      .upsert(
-        // Truncated: reasons are short by construction, but never unbounded.
-        rows.map((row) => ({
-          ...row,
-          reason: row.reason.slice(0, 500),
-          correlation_id: correlationId,
-        })),
-        { onConflict: 'event_id', ignoreDuplicates: true },
-      );
+    for (const chunk of batches(rows, this.#batchSize)) {
+      const { error } = await this.#client
+        .from('indexer_rejected_events')
+        .upsert(
+          // Truncated: reasons are short by construction, but never unbounded.
+          chunk.map((row) => ({
+            ...row,
+            reason: row.reason.slice(0, 500),
+            correlation_id: correlationId,
+          })),
+          { onConflict: 'event_id', ignoreDuplicates: true },
+        );
 
-    if (error) {
-      throw new Error(`Failed to persist rejected events: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to persist rejected events: ${error.message}`);
+      }
     }
   }
 
@@ -206,12 +240,14 @@ export class IndexerDb {
   async upsertGroups(rows: readonly NewGroup[]): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from('groups')
-      .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
+    for (const chunk of batches(rows, this.#batchSize)) {
+      const { error } = await this.#client
+        .from('groups')
+        .upsert([...chunk], { onConflict: 'contract_id', ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to upsert groups: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to upsert groups: ${error.message}`);
+      }
     }
   }
 
@@ -241,12 +277,14 @@ export class IndexerDb {
   ): Promise<void> {
     if (rows.length === 0) return;
 
-    const { error } = await this.#client
-      .from(table)
-      .upsert([...rows], { onConflict, ignoreDuplicates: true });
+    for (const chunk of batches(rows, this.#batchSize)) {
+      const { error } = await this.#client
+        .from(table)
+        .upsert([...chunk], { onConflict, ignoreDuplicates: true });
 
-    if (error) {
-      throw new Error(`Failed to record ${table}: ${error.message}`);
+      if (error) {
+        throw new Error(`Failed to record ${table}: ${error.message}`);
+      }
     }
   }
 
